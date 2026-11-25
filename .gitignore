@@ -1,0 +1,28 @@
+# Generated app bundles, installers and test outputs
+.DS_Store
+**/build/
+*.app/
+*.exe
+*.res
+*.syso
+*.test
+*.test.exe
+*.dSYM/
+*.swiftmodule
+*.swiftdoc
+*.abi.json
+*.zip
+
+# Local app data and development profiles
+data.json
+planner.json
+appearance.json
+**/isolated-profile/
+qa-*/
+.env
+.env.*
+*.log
+**/IMPLEMENTATION_NOTES.md
+
+# Retained Windows resource object is a build input
+!windows/resources_windows_amd64.syso
