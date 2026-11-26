@@ -93,6 +93,7 @@ const (
 	wmSize             = 0x0005
 	wmClose            = 0x0010
 	wmGetMinMaxInfo    = 0x0024
+	wmDrawItem         = 0x002b
 	wmCommand          = 0x0111
 	wmHScroll          = 0x0114
 	wmTimer            = 0x0113
@@ -222,11 +223,13 @@ var (
 	scale, systemScale                                                                   = 1.0, 1.0
 	workArea                                                                             rect
 	minOuterWidth, minOuterHeight, nonClientWidth, nonClientHeight                       int
-	normalFont, headingFont, smallFont, boldFont, bgBrush, sideBrush, blueBrush          uintptr
+	normalFont, headingFont, smallFont, boldFont, bgBrush, sideBrush                     uintptr
+	heroFont, metricFont, symbolFont, pinButton, settingsButton, countdownDate           uintptr
 	view                                                                                 int
 	viewControls                                                                         [4][]uintptr
 	navControls                                                                          []uintptr
 	countdownButtons                                                                     [5]uintptr
+	cardStatus                                                                           [5]countdownStatus
 	dateEditor                                                                           []uintptr
 	dateStart, dateEnd, dateEndLabel, dateContext, dateReset                             uintptr
 	dateEditing                                                                          Kind
@@ -444,8 +447,11 @@ func layoutControls(clientWidth, clientHeight int) {
 	// DPI. The minimum outer size keeps every original control visible.
 	dw := max(0, clientWidth-744)
 	dh := max(0, clientHeight-661)
-	for i, h := range countdownButtons {
-		moveControl(h, 166, 104+i*94, 552+dw, 78)
+	moveControl(settingsButton, 12, clientHeight-52, 118, 38)
+	moveControl(pinButton, 16, clientHeight-88, 112, 25)
+	moveControl(countdownButtons[0], 166, 94, 552+dw, 124)
+	for i := 1; i < len(countdownButtons); i++ {
+		moveControl(countdownButtons[i], 166, 262+(i-1)*71, 552+dw, 62)
 	}
 	moveControl(quickTitle, 166, 100, 438+dw, 34)
 	moveID(idQuickAdd, 614+dw, 100, 104, 34)
@@ -522,6 +528,7 @@ func showView(next int) {
 		setVisible(viewControls[i], i == view)
 	}
 	refreshView()
+	invalidateNavigation()
 	pInvalidateRect.Call(mainWnd, 0, 1)
 }
 func openSettings() {
@@ -541,6 +548,7 @@ func openSettings() {
 	position := int(previewOpacity*100 + .5)
 	pSendMessage.Call(opacitySlider, 0x405, 1, uintptr(position))
 	applyOpacity(previewOpacity)
+	invalidateNavigation()
 	pInvalidateRect.Call(mainWnd, 0, 1)
 }
 func closeSettings() {
@@ -552,6 +560,7 @@ func closeSettings() {
 	setVisible(settingsControls, false)
 	setVisible(viewControls[view], true)
 	refreshView()
+	invalidateNavigation()
 	pInvalidateRect.Call(mainWnd, 0, 1)
 }
 func saveNames() {
@@ -611,14 +620,24 @@ func refreshView() {
 
 func refreshCountdown() {
 	now := time.Now()
+	weekdays := [...]string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
+	setText(countdownDate, "今天 · "+now.Format("2006年1月2日")+" "+weekdays[now.Weekday()])
 	for i, k := range Events {
 		name, customized := customName(k)
-		a, b := DescribeNamed(k, state, now, name, customized)
-		s := name + "\r\n" + a
-		if b != "" {
-			s += "   " + b
+		c := describeCountdown(k, state, now, name, customized)
+		cardStatus[i] = c
+		s := name + "，" + c.description()
+		if c.Date != "" {
+			s += "，" + c.Date
 		}
 		setText(countdownButtons[i], s)
+		pInvalidateRect.Call(countdownButtons[i], 0, 0)
+	}
+}
+
+func invalidateNavigation() {
+	for _, h := range navControls {
+		pInvalidateRect.Call(h, 0, 0)
 	}
 }
 func refreshToday() {
@@ -1097,9 +1116,14 @@ func handleCommand(id int, n uint16) {
 	case idNavNotes:
 		showView(3)
 	case idPin:
-		c, _, _ := pSendMessage.Call(navControls[len(navControls)-2], bmGetCheck, 0, 0)
+		c, _, _ := pSendMessage.Call(pinButton, bmGetCheck, 0, 0)
 		if err := state.SetPinned(c == 1); err != nil {
 			message(mainWnd, "无法保存置顶设置："+err.Error(), 0x10)
+			if state.Pinned {
+				pSendMessage.Call(pinButton, bmSetCheck, 1, 0)
+			} else {
+				pSendMessage.Call(pinButton, bmSetCheck, 0, 0)
+			}
 		}
 		setTopmost(state.Pinned)
 	case idSettings:
@@ -1219,6 +1243,10 @@ func wndProc(hwnd uintptr, m uint32, wp, lp uintptr) uintptr {
 			}
 		}
 		return 0
+	case wmDrawItem:
+		if drawSurface(lp) {
+			return 1
+		}
 	case 0x000f:
 		var ps paintStruct
 		dc, _, _ := pBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
@@ -1228,17 +1256,21 @@ func wndProc(hwnd uintptr, m uint32, wp, lp uintptr) uintptr {
 			pGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&client)))
 			r := rect{0, 0, int32(px(142)), client.Bottom}
 			pFillRect.Call(dc, uintptr(unsafe.Pointer(&r)), sideBrush)
-			if !dateEditorOpen && !taskEditorOpen && !settingsOpen {
-				a := rect{0, int32(px(95 + view*54)), int32(px(5)), int32(px(137 + view*54))}
-				pFillRect.Call(dc, uintptr(unsafe.Pointer(&a)), blueBrush)
-			}
+			line := rect{int32(px(142)), 0, int32(px(142)) + 1, client.Bottom}
+			fillColor(dc, line, rgb(217, 225, 235))
 		}
 		pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		return 0
 	case 0x0138:
 		pSetTextColor.Call(wp, rgb(31, 41, 55))
-		pSetBkColor.Call(wp, rgb(247, 249, 252))
+		pSetBkColor.Call(wp, rgb(244, 247, 251))
 		return bgBrush
+	case 0x0135: // WM_CTLCOLORBTN
+		if lp == pinButton {
+			pSetTextColor.Call(wp, textInk)
+			pSetBkColor.Call(wp, rgb(234, 239, 245))
+			return sideBrush
+		}
 	case wmCommand:
 		handleCommand(int(wp&0xffff), uint16(wp>>16))
 		return 0
@@ -1301,25 +1333,27 @@ func wndProc(hwnd uintptr, m uint32, wp, lp uintptr) uintptr {
 func rgb(r, g, b uintptr) uintptr { return r | g<<8 | b<<16 }
 
 func buildControls() {
-	brand := static("有盼", 24, 24, 100, 34, true)
-	navControls = append(navControls, brand)
-	for i, s := range []string{"倒计时", "今天", "日历", "笔记"} {
-		navControls = append(navControls, button(s, 16, 92+i*54, 110, 42, idNavCountdown+i))
+	for i, s := range navNames[:4] {
+		navControls = append(navControls, create("BUTTON", s, wsTabstop|bsOwnerDraw, 0, 12, 24+i*47, 118, 38, idNavCountdown+i))
 	}
-	navControls = append(navControls, button("设置", 16, 320, 110, 42, idSettings))
-	pin := create("BUTTON", "窗口置顶", wsTabstop|3, 0, 22, 570, 105, 28, idPin)
-	font(pin, smallFont)
+	pinButton = create("BUTTON", "窗口置顶", wsTabstop|3, 0, 16, baseClientHeight-88, 112, 25, idPin)
+	font(pinButton, smallFont)
 	if state.Pinned {
-		pSendMessage.Call(pin, bmSetCheck, 1, 0)
+		pSendMessage.Call(pinButton, bmSetCheck, 1, 0)
 	}
-	navControls = append(navControls, pin)
-	hint := static("关闭窗口后仍在托盘运行\r\n退出有盼后停止提醒", 18, 610, 116, 42, false)
-	font(hint, smallFont)
-	navControls = append(navControls, hint)
-	v0 := []uintptr{static("倒计时", 166, 24, 220, 40, true), static("把值得期待的日子放在眼前", 168, 65, 360, 26, false)}
+	settingsButton = create("BUTTON", "设置", wsTabstop|bsOwnerDraw, 0, 12, baseClientHeight-52, 118, 38, idSettings)
+	navControls = append(navControls, pinButton, settingsButton)
+	countdownDate = static("", 166, 62, 330, 24, false)
+	font(countdownDate, smallFont)
+	otherHeading := static("其他倒计时", 166, 230, 180, 26, false)
+	font(otherHeading, boldFont)
+	v0 := []uintptr{static("倒计时", 166, 24, 220, 38, true), countdownDate, otherHeading}
 	for i, k := range Events {
-		h := button(k.Title(), 166, 104+i*94, 552, 78, idCountdownBase+i)
-		font(h, boldFont)
+		y, height := 262+(i-1)*71, 62
+		if i == 0 {
+			y, height = 94, 124
+		}
+		h := create("BUTTON", k.Title(), wsTabstop|bsOwnerDraw, 0, 166, y, 552, height, idCountdownBase+i)
 		countdownButtons[i] = h
 		v0 = append(v0, h)
 	}
@@ -1487,11 +1521,13 @@ func main() {
 	headingFont, _, _ = pCreateFont.Call(^uintptr(px(27)-1), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Microsoft YaHei UI"))))
 	smallFont, _, _ = pCreateFont.Call(^uintptr(px(13)-1), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Microsoft YaHei UI"))))
 	boldFont, _, _ = pCreateFont.Call(^uintptr(px(18)-1), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Microsoft YaHei UI"))))
-	bgBrush, _, _ = pCreateSolidBrush.Call(rgb(247, 249, 252))
-	sideBrush, _, _ = pCreateSolidBrush.Call(rgb(255, 255, 255))
-	blueBrush, _, _ = pCreateSolidBrush.Call(rgb(62, 124, 236))
+	bgBrush, _, _ = pCreateSolidBrush.Call(rgb(244, 247, 251))
+	sideBrush, _, _ = pCreateSolidBrush.Call(rgb(234, 239, 245))
+	heroFont, _, _ = pCreateFont.Call(^uintptr(px(41)-1), 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Microsoft YaHei UI"))))
+	metricFont, _, _ = pCreateFont.Call(^uintptr(px(21)-1), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Microsoft YaHei UI"))))
+	symbolFont, _, _ = pCreateFont.Call(^uintptr(px(18)-1), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Segoe UI Symbol"))))
 	defer func() {
-		for _, h := range []uintptr{normalFont, headingFont, smallFont, boldFont, bgBrush, sideBrush, blueBrush} {
+		for _, h := range []uintptr{normalFont, headingFont, smallFont, boldFont, heroFont, metricFont, symbolFont, bgBrush, sideBrush} {
 			if h != 0 {
 				pDeleteObject.Call(h)
 			}

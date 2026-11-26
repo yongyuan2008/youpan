@@ -249,25 +249,44 @@ func Describe(k Kind, s State, now time.Time) (string, string) {
 	return DescribeNamed(k, s, now, k.Title(), false)
 }
 
-// DescribeNamed keeps the 2.0 wording for default names, while custom names
-// use neutral status text so a renamed item never continues to say “退休” or
-// “放假”.
+// countdownStatus separates the date, numeric value and phase so the
+// dashboard can lay them out independently without parsing display text.
+type countdownStatus struct {
+	Caption string
+	Metric  string
+	Date    string
+	Join    string
+}
+
+func (c countdownStatus) description() string {
+	if c.Metric == "" {
+		return c.Caption
+	}
+	return c.Caption + c.Join + c.Metric
+}
+
+// DescribeNamed keeps existing wording for accessibility and text callers.
 func DescribeNamed(k Kind, s State, now time.Time, name string, customized bool) (string, string) {
+	c := describeCountdown(k, s, now, name, customized)
+	return c.description(), c.Date
+}
+
+func describeCountdown(k Kind, s State, now time.Time, name string, customized bool) countdownStatus {
 	d, custom := s.Dates[k]
 	if !custom {
 		if k != Labor && k != National {
-			if customized {
-				return "待设置 · 设置" + name + "日期", ""
+			if !customized {
+				name = "假期"
+				if k == Retirement {
+					name = "退休"
+				}
 			}
-			if k == Retirement {
-				return "待设置 · 设置退休日期", ""
-			}
-			return "待设置 · 设置假期日期", ""
+			return countdownStatus{Caption: "待设置", Metric: "设置" + name + "日期", Join: " · "}
 		}
 		d.Start = annual(k, now)
 	}
 	if validate(k, d) != nil {
-		return "待设置 · 日期无效，请重新设置", ""
+		return countdownStatus{Caption: "待设置", Metric: "日期无效，请重新设置", Join: " · "}
 	}
 	start, _ := parseDate(d.Start)
 	today := civil(now)
@@ -276,56 +295,64 @@ func DescribeNamed(k Kind, s State, now time.Time, name string, customized bool)
 	if d.End != "" {
 		line += " 至 " + d.End
 	}
+	days := func(caption string, n int) countdownStatus {
+		return countdownStatus{Caption: caption, Metric: fmt.Sprintf("%d 天", n), Date: line, Join: " "}
+	}
+	todayStatus := func(detail string) countdownStatus {
+		return countdownStatus{Caption: "今天", Metric: detail, Date: line, Join: " · "}
+	}
 	if delta > 0 {
-		if customized {
-			return fmt.Sprintf("距%s %d 天", name, delta), line
-		}
 		caption := "距放假"
-		if k == Retirement {
+		switch {
+		case customized:
+			caption = "距" + name
+		case k == Retirement:
 			caption = "距退休"
-		} else if !custom {
+		case !custom:
 			caption = "距节日"
 		}
-		return fmt.Sprintf("%s %d 天", caption, delta), line
+		return days(caption, delta)
 	}
 	if k == Retirement {
-		if customized {
-			if delta == 0 {
-				return "今天 · " + name, line
-			}
-			return fmt.Sprintf("%s已结束 %d 天", name, -delta), line
-		}
 		if delta == 0 {
-			return "今天 · 退休日", line
+			if customized {
+				return todayStatus(name)
+			}
+			return todayStatus("退休日")
 		}
-		return fmt.Sprintf("已退休 %d 天", -delta), line
+		if customized {
+			return days(name+"已结束", -delta)
+		}
+		return days("已退休", -delta)
 	}
 	if d.End != "" {
 		end, _ := parseDate(d.End)
 		if !today.After(end) {
+			caption := "假期中"
 			if customized {
-				return fmt.Sprintf("%s进行中 · 第 %d 天", name, -delta+1), line
+				caption = name + "进行中"
 			}
-			return fmt.Sprintf("假期中 · 第 %d 天", -delta+1), line
+			return countdownStatus{Caption: caption, Metric: fmt.Sprintf("第 %d 天", -delta+1), Date: line, Join: " · "}
 		}
+		caption := "假期已结束"
 		if customized {
-			return fmt.Sprintf("%s已结束 %d 天", name, int((today.Unix()-end.Unix())/86400)), line
+			caption = name + "已结束"
 		}
-		return fmt.Sprintf("假期已结束 %d 天", int((today.Unix()-end.Unix())/86400)), line
+		return days(caption, int((today.Unix()-end.Unix())/86400))
 	}
 	if delta == 0 {
 		if customized {
-			return "今天 · " + name, line
+			return todayStatus(name)
 		}
 		if !custom {
-			return "今天 · 节日当天", line
+			return todayStatus("节日当天")
 		}
-		return "今天 · 假期开始日", line
+		return todayStatus("假期开始日")
 	}
 	if customized {
-		return fmt.Sprintf("%s已结束 %d 天", name, -delta), line
+		return days(name+"已结束", -delta)
 	}
-	return fmt.Sprintf("开始日期已过 %d 天", -delta), line
+	return days("开始日期已过", -delta)
 }
 
 // Planner data intentionally lives beside, not inside, the compatible
