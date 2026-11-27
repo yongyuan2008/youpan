@@ -14,8 +14,8 @@ import (
 const (
 	defaultWindowWidth  = 760
 	defaultWindowHeight = 700
-	minWindowWidth      = 760
-	minWindowHeight     = 700
+	minWindowWidth      = 560
+	minWindowHeight     = 510
 	maxWindowWidth      = 3840
 	maxWindowHeight     = 2160
 	minOpacity          = 0.50
@@ -26,12 +26,19 @@ const (
 // planner.json. Older builds therefore keep reading the exact schemas they
 // already understand.
 type Appearance struct {
-	Width   int             `json:"width"`
-	Height  int             `json:"height"`
-	Opacity float64         `json:"opacity"`
-	Names   map[Kind]string `json:"names"`
-	path    string
-	blocked bool
+	Width           int              `json:"width"`
+	Height          int              `json:"height"`
+	Opacity         float64          `json:"opacity"`
+	Names           map[Kind]string  `json:"names"`
+	DesktopPinned   bool             `json:"desktopPinned,omitempty"`
+	DesktopPosition *DesktopPosition `json:"desktopPosition,omitempty"`
+	path            string
+	blocked         bool
+}
+
+type DesktopPosition struct {
+	X int32 `json:"x"`
+	Y int32 `json:"y"`
 }
 
 func defaultAppearance() Appearance {
@@ -59,7 +66,7 @@ func LoadAppearance() (Appearance, error) {
 func loadAppearancePath(p string) (Appearance, error) {
 	a := defaultAppearance()
 	a.path = p
-	b, err := os.ReadFile(p)
+	b, err := readJSONFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		return a, nil
 	}
@@ -165,6 +172,18 @@ func (a *Appearance) SetOpacity(opacity float64) error {
 	return a.save(n)
 }
 
+func (a *Appearance) SetDesktopPinned(pinned bool) error {
+	n := copyAppearance(*a)
+	n.DesktopPinned = pinned
+	return a.save(n)
+}
+
+func (a *Appearance) SetDesktopPosition(x, y int32) error {
+	n := copyAppearance(*a)
+	n.DesktopPosition = &DesktopPosition{X: x, Y: y}
+	return a.save(n)
+}
+
 func (a *Appearance) SetNames(names map[Kind]string) error {
 	n := copyAppearance(*a)
 	n.Names = make(map[Kind]string, len(names))
@@ -189,6 +208,7 @@ func (a *Appearance) ResetNames() error {
 func (a *Appearance) ResetVisuals() error {
 	n := copyAppearance(*a)
 	n.Width, n.Height, n.Opacity = defaultWindowWidth, defaultWindowHeight, 1
+	n.DesktopPinned = false
 	return a.save(n)
 }
 

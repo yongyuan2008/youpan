@@ -35,8 +35,17 @@ func TestFitGeometryCommonDPIWorkAreas(t *testing.T) {
 			if got.ClientWidth < int(float64(baseClientWidth)*got.Scale+.5) || got.ClientHeight < int(float64(baseClientHeight)*got.Scale+.5) {
 				t.Fatalf("base content clipped: %+v", got)
 			}
-			if float64(got.MinOuterWidth)/got.Scale+1e-9 < minWindowWidth || float64(got.MinOuterHeight)/got.Scale+1e-9 < minWindowHeight {
+			if math.Round(float64(got.MinOuterWidth)/got.Scale) < minWindowWidth || math.Round(float64(got.MinOuterHeight)/got.Scale) < minWindowHeight {
 				t.Fatalf("stored logical minimum would fail validation: %+v", got)
+			}
+			if got.MinOuterWidth >= got.ClientWidth+tc.nonClientWidth || got.MinOuterHeight >= got.ClientHeight+tc.nonClientHeight {
+				t.Fatalf("default size has no room to shrink: %+v", got)
+			}
+			w := got.MinOuterWidth - tc.nonClientWidth
+			h := got.MinOuterHeight - tc.nonClientHeight
+			compact := contentScale(w, h, got.Scale)
+			if compact >= got.Scale || math.Round(baseClientWidth*compact) > float64(w) || math.Round(baseClientHeight*compact) > float64(h) {
+				t.Fatalf("compact window would clip content: %dx%d at %.3f", w, h, compact)
 			}
 		})
 	}

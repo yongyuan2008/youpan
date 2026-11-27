@@ -1,11 +1,35 @@
 import Foundation
 import Combine
+import CoreGraphics
 
 struct AppearanceConfiguration: Codable, Equatable {
     var width: Double
     var height: Double
     var opacity: Double
     var names: [String: String]
+    var pinnedToDesktop: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case width, height, opacity, names, pinnedToDesktop
+    }
+
+    init(width: Double, height: Double, opacity: Double, names: [String: String], pinnedToDesktop: Bool) {
+        self.width = width
+        self.height = height
+        self.opacity = opacity
+        self.names = names
+        self.pinnedToDesktop = pinnedToDesktop
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        width = try values.decode(Double.self, forKey: .width)
+        height = try values.decode(Double.self, forKey: .height)
+        opacity = try values.decode(Double.self, forKey: .opacity)
+        names = try values.decode([String: String].self, forKey: .names)
+        // v2.2 and older appearance files do not contain this key.
+        pinnedToDesktop = try values.decodeIfPresent(Bool.self, forKey: .pinnedToDesktop) ?? false
+    }
 
     static let defaultWidth = 760.0
     static let defaultHeight = 640.0
@@ -17,7 +41,39 @@ struct AppearanceConfiguration: Codable, Equatable {
     static let maximumDimension = 4096.0
 
     static var `default`: AppearanceConfiguration {
-        AppearanceConfiguration(width: defaultWidth, height: defaultHeight, opacity: defaultOpacity, names: [:])
+        AppearanceConfiguration(width: defaultWidth, height: defaultHeight, opacity: defaultOpacity, names: [:], pinnedToDesktop: false)
+    }
+}
+
+enum DesktopPanelGeometry {
+    static let defaultSize = CGSize(width: 316, height: 318)
+
+    static func cappedFrame(_ frame: CGRect, visibleFrames: [CGRect], fallback: CGRect) -> CGRect {
+        let candidates = visibleFrames.filter { $0.width > 0 && $0.height > 0 }
+        let screens = candidates.isEmpty ? [fallback] : candidates
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        let target = screens.max { lhs, rhs in
+            let lhsArea = intersectionArea(frame, lhs)
+            let rhsArea = intersectionArea(frame, rhs)
+            if lhsArea != rhsArea { return lhsArea < rhsArea }
+            return squaredDistance(center, CGPoint(x: lhs.midX, y: lhs.midY)) > squaredDistance(center, CGPoint(x: rhs.midX, y: rhs.midY))
+        } ?? fallback
+        var result = frame
+        result.size.width = min(max(1, frame.width), target.width)
+        result.size.height = min(max(1, frame.height), target.height)
+        result.origin.x = min(max(frame.minX, target.minX), target.maxX - result.width)
+        result.origin.y = min(max(frame.minY, target.minY), target.maxY - result.height)
+        return result
+    }
+
+    private static func intersectionArea(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        return intersection.isNull ? 0 : intersection.width * intersection.height
+    }
+
+    private static func squaredDistance(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
+        let x = lhs.x - rhs.x, y = lhs.y - rhs.y
+        return x * x + y * y
     }
 }
 
@@ -114,6 +170,7 @@ final class AppearanceStore: ObservableObject {
     var width: Double { configuration.width }
     var height: Double { configuration.height }
     var opacity: Double { configuration.opacity }
+    var pinnedToDesktop: Bool { configuration.pinnedToDesktop }
 
     func customName(for kind: EventKind) -> String? { configuration.names[kind.rawValue] }
     func name(for kind: EventKind) -> String { customName(for: kind) ?? kind.title }
@@ -133,11 +190,18 @@ final class AppearanceStore: ObservableObject {
         try persist(next)
     }
 
+    func setPinnedToDesktop(_ value: Bool) throws {
+        var next = configuration
+        next.pinnedToDesktop = value
+        try persist(next)
+    }
+
     func resetAppearance() throws {
         var next = configuration
         next.width = AppearanceConfiguration.defaultWidth
         next.height = AppearanceConfiguration.defaultHeight
         next.opacity = AppearanceConfiguration.defaultOpacity
+        next.pinnedToDesktop = false
         try persist(next)
     }
 

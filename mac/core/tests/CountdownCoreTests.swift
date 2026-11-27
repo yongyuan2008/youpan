@@ -26,6 +26,18 @@ import Foundation
         check(fittedScale < 1 && fittedLayout.width >= 700 && fittedLayout.height >= 590, "small main window scales the complete baseline layout")
         check(fittedLayout.width * fittedScale <= fittedViewport.width + 0.01 && fittedLayout.height * fittedScale <= fittedViewport.height + 0.01, "scaled main content fits entirely inside 600 by 540 viewport")
         check(WindowGeometry.fitScale(viewport: CGSize(width: 760, height: 640)) == 1, "normal window keeps one-to-one rendering")
+        let desktopFrame = DesktopPanelGeometry.cappedFrame(
+            CGRect(origin: CGPoint(x: 950, y: 740), size: DesktopPanelGeometry.defaultSize),
+            visibleFrames: [CGRect(x: 0, y: 0, width: 1000, height: 800)],
+            fallback: CGRect(x: 0, y: 0, width: 1000, height: 800)
+        )
+        check(desktopFrame.maxX == 1000 && desktopFrame.maxY == 800, "desktop panel position caps to visible screen")
+        let secondScreenFrame = DesktopPanelGeometry.cappedFrame(
+            CGRect(origin: CGPoint(x: 1200, y: 40), size: DesktopPanelGeometry.defaultSize),
+            visibleFrames: [CGRect(x: 0, y: 0, width: 1000, height: 800), CGRect(x: 1000, y: 0, width: 1000, height: 800)],
+            fallback: CGRect(x: 0, y: 0, width: 1000, height: 800)
+        )
+        check(secondScreenFrame.minX == 1200, "desktop panel remains on its visible external screen")
         guard let testDirectory = ProcessInfo.processInfo.environment["RIZI_COUNTDOWN_TEST_DIRECTORY"], !testDirectory.isEmpty else {
             fatalError("RIZI_COUNTDOWN_TEST_DIRECTORY is required for isolated tests")
         }
@@ -52,6 +64,12 @@ import Foundation
         let appearance = AppearanceStore(url: appearanceURL)
         check(appearance.configuration == .default, "appearance defaults without first-launch write")
         check(!FileManager.default.fileExists(atPath: appearanceURL.path), "appearance default does not write")
+        let v22AppearanceURL = root.appendingPathComponent("appearance-v22.json")
+        try Data(#"{"width":760,"height":640,"opacity":0.82,"names":{"retirement":"纪念日"}}"#.utf8).write(to: v22AppearanceURL)
+        let v22Appearance = AppearanceStore(url: v22AppearanceURL)
+        check(!v22Appearance.pinnedToDesktop && v22Appearance.name(for: .retirement) == "纪念日", "v2.2 appearance loads with desktop pin default off")
+        try v22Appearance.setPinnedToDesktop(true)
+        check(AppearanceStore(url: v22AppearanceURL).pinnedToDesktop, "desktop pin setting round trips")
         try appearance.updateSize(width: 1000, height: 780)
         try appearance.updateOpacity(0.73)
         try appearance.updateNames(["retirement": " 生日🎂 ", "winter": "雪季", "summer": "暑假"])
@@ -64,7 +82,7 @@ import Foundation
         try reopenedAppearance.updateOpacity(0.5)
         check(reopenedAppearance.width == 520 && reopenedAppearance.height == 440 && reopenedAppearance.opacity == 0.5, "minimum viewport boundaries accepted")
         try reopenedAppearance.resetAppearance()
-        check(reopenedAppearance.width == 760 && reopenedAppearance.height == 640 && reopenedAppearance.opacity == 1, "default appearance reset")
+        check(reopenedAppearance.width == 760 && reopenedAppearance.height == 640 && reopenedAppearance.opacity == 1 && !reopenedAppearance.pinnedToDesktop, "default appearance reset")
         check(reopenedAppearance.name(for: .retirement) == "生日🎂", "appearance reset preserves names")
 
         let appearanceBeforeInvalid = reopenedAppearance.configuration
@@ -138,7 +156,10 @@ import Foundation
         let due = ReminderLogic.due(tasks: [reminderTask], delivered: [], now: now, timeZone: utcZone)
         check(due.count == 1 && due[0].occurrence == "2026-11-25", "same-day catch-up")
         let simultaneous = PlannerTask(id: "r2", title: "另一项", startDate: "2026-11-25", reminderTime: "09:00")
-        check(ReminderLogic.due(tasks: [reminderTask, simultaneous], delivered: [], now: now, timeZone: utcZone).count == 2, "simultaneous reminders grouped in one due batch")
+        let simultaneousDue = ReminderLogic.due(tasks: [reminderTask, simultaneous], delivered: [], now: now, timeZone: utcZone)
+        check(simultaneousDue.count == 2, "simultaneous reminders grouped in one due batch")
+        let mergedUnread = ReminderLogic.mergingUnread(due, with: simultaneousDue)
+        check(mergedUnread.count == 2 && mergedUnread[0].key == due[0].key, "new real reminders merge into the unread panel without duplicates")
         check(ReminderLogic.due(tasks: [reminderTask], delivered: [], now: utc("2026-11-25T08:59:00Z"), timeZone: utcZone).isEmpty, "future reminder suppressed")
         check(ReminderLogic.due(tasks: [reminderTask], delivered: Set([due[0].key]), now: now, timeZone: utcZone).isEmpty, "dedup suppresses")
         var doneReminder = reminderTask; doneReminder.completedOccurrences.insert("2026-11-25")
@@ -195,7 +216,10 @@ import Foundation
         // Central quit guard saves dirty note drafts and blocks termination when saving fails.
         let saveGuard = UnsavedNoteGuard(); var saveCount = 0
         saveGuard.register { saveCount += 1; return true }; saveGuard.setDirty(true)
-        check(saveGuard.attemptSave() && saveCount == 1 && !saveGuard.isDirty, "dirty quit guard saves once")
+        check(saveGuard.attemptSave() && saveCount == 1 && !saveGuard.isDirty && saveGuard.editorTitle == "笔记", "dirty quit guard saves once")
+        saveGuard.register(editorTitle: "倒计时名称", editorObject: "修改后的倒计时名称") { true }
+        saveGuard.setDirty(true)
+        check(saveGuard.editorTitle == "倒计时名称" && saveGuard.editorObject == "修改后的倒计时名称", "quit guard provides the active editor prompt")
         saveGuard.register { false }; saveGuard.setDirty(true)
         check(!saveGuard.attemptSave() && saveGuard.isDirty, "failed quit save remains dirty and blocks termination")
         saveGuard.discard(); check(!saveGuard.isDirty, "explicit discard clears quit guard")

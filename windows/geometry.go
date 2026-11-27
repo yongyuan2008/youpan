@@ -13,10 +13,8 @@ type fittedGeometry struct {
 	MinOuterWidth, MinOuterHeight int
 }
 
-// fitGeometry chooses the largest UI scale that preserves the complete base
-// client area inside the current work area. Non-client dimensions are supplied
-// by the platform because a system-DPI-aware caption and frame do not shrink
-// when the UI scale is reduced.
+// fitGeometry sets the window size units from the work area and system DPI.
+// The client UI can shrink further inside an individual window.
 func fitGeometry(workWidth, workHeight int, systemScale float64, nonClientWidth, nonClientHeight int) fittedGeometry {
 	if workWidth < 1 {
 		workWidth = 1
@@ -31,17 +29,20 @@ func fitGeometry(workWidth, workHeight int, systemScale float64, nonClientWidth,
 	nonClientHeight = max(0, min(nonClientHeight, workHeight-1))
 	availableWidth := max(1, workWidth-nonClientWidth)
 	availableHeight := max(1, workHeight-nonClientHeight)
-	scale := math.Min(systemScale, math.Min(float64(availableWidth)/baseClientWidth, float64(availableHeight)/baseClientHeight))
-	if scale <= 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
-		scale = math.Min(systemScale, 1/float64(max(baseClientWidth, baseClientHeight)))
-	}
+	scale := contentScale(availableWidth, availableHeight, systemScale)
 	clientWidth := min(availableWidth, max(1, int(float64(baseClientWidth)*scale+.5)))
 	clientHeight := min(availableHeight, max(1, int(float64(baseClientHeight)*scale+.5)))
 	return fittedGeometry{
 		Scale:          scale,
 		ClientWidth:    clientWidth,
 		ClientHeight:   clientHeight,
-		MinOuterWidth:  min(workWidth, clientWidth+nonClientWidth),
-		MinOuterHeight: min(workHeight, clientHeight+nonClientHeight),
+		MinOuterWidth:  min(workWidth, max(nonClientWidth+1, int(float64(minWindowWidth)*scale+.5))),
+		MinOuterHeight: min(workHeight, max(nonClientHeight+1, int(float64(minWindowHeight)*scale+.5))),
 	}
+}
+
+func contentScale(clientWidth, clientHeight int, ceiling float64) float64 {
+	widthFit := float64(max(1, clientWidth)) / baseClientWidth
+	heightFit := float64(max(1, clientHeight)) / baseClientHeight
+	return math.Min(ceiling, math.Min(widthFit, heightFit))
 }

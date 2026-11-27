@@ -170,7 +170,7 @@ func TestAppearanceNameUnicodeWhitespaceAndLength(t *testing.T) {
 func TestAppearanceBoundsAndMalformedProtection(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "appearance.json")
 	a, _ := loadAppearancePath(p)
-	for _, size := range [][2]int{{759, 700}, {760, 699}, {3841, 700}, {760, 2161}} {
+	for _, size := range [][2]int{{minWindowWidth - 1, 700}, {760, minWindowHeight - 1}, {3841, 700}, {760, 2161}} {
 		if err := a.SetWindow(size[0], size[1]); err == nil {
 			t.Fatalf("accepted size %v", size)
 		}

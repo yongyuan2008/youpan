@@ -88,18 +88,30 @@ enum TaskEditorDefaults {
 final class UnsavedNoteGuard {
     static let shared = UnsavedNoteGuard()
     private(set) var isDirty = false
+    private(set) var editorTitle = "笔记"
+    private(set) var editorObject = "这篇笔记"
     private var saver: (() -> Bool)?
 
-    func register(saver: @escaping () -> Bool) { self.saver = saver; isDirty = false }
+    func register(editorTitle: String = "笔记", editorObject: String = "这篇笔记", saver: @escaping () -> Bool) {
+        self.editorTitle = editorTitle
+        self.editorObject = editorObject
+        self.saver = saver
+        isDirty = false
+    }
     func setDirty(_ value: Bool) { isDirty = value }
-    func unregister() { saver = nil; isDirty = false }
+    func unregister() {
+        saver = nil
+        isDirty = false
+        editorTitle = "笔记"
+        editorObject = "这篇笔记"
+    }
     func attemptSave() -> Bool {
         guard isDirty else { return true }
         guard let saver, saver() else { return false }
         isDirty = false
         return true
     }
-    func discard() { isDirty = false; saver = nil }
+    func discard() { unregister() }
 }
 
 enum TaskSchedule {
@@ -239,6 +251,11 @@ struct ReminderEvent: Equatable {
 }
 
 enum ReminderLogic {
+    static func mergingUnread(_ existing: [ReminderEvent], with incoming: [ReminderEvent]) -> [ReminderEvent] {
+        var seen = Set(existing.map(\.key))
+        return existing + incoming.filter { seen.insert($0.key).inserted }
+    }
+
     /// Catches up reminders from the current local day only. Launching or waking later the same day
     /// still reminds once, while earlier days (including repeating occurrences) never flood forward.
     static func due(tasks: [PlannerTask], delivered: Set<String>, now: Date, timeZone: TimeZone = .current) -> [ReminderEvent] {

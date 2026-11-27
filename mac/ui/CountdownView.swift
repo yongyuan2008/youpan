@@ -646,12 +646,17 @@ private struct AppearanceSettingsView: View {
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
             }
 
-            GroupBox("窗口透明度") {
-                HStack(spacing: 12) {
-                    Slider(value: Binding(get: { appearance.opacity }, set: updateOpacity), in: 0.5...1.0, step: 0.01)
-                        .accessibilityLabel("窗口透明度")
-                    Text("\(Int((appearance.opacity * 100).rounded()))%")
-                        .monospacedDigit().frame(width: 44, alignment: .trailing)
+            GroupBox("窗口透明度与桌面显示") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        Slider(value: Binding(get: { appearance.opacity }, set: updateOpacity), in: 0.5...1.0, step: 0.01)
+                            .accessibilityLabel("窗口透明度")
+                        Text("\(Int((appearance.opacity * 100).rounded()))%")
+                            .monospacedDigit().frame(width: 44, alignment: .trailing)
+                    }
+                    Toggle("固定在桌面", isOn: Binding(get: { appearance.pinnedToDesktop }, set: updateDesktopPin))
+                        .help("在桌面层显示可拖动的只读五项倒计时；关闭主窗口后仍保留")
+                        .accessibilityLabel("固定五项倒计时在桌面")
                 }.padding(.vertical, 4)
             }
 
@@ -677,7 +682,7 @@ private struct AppearanceSettingsView: View {
             if let savedStatus { Label(savedStatus, systemImage: "checkmark.circle").foregroundColor(.green).font(.caption) }
             HStack {
                 Button("恢复默认外观") { resetAppearance() }
-                    .help("恢复标准窗口大小和 100% 透明度；不会修改日期、任务或名称")
+                    .help("恢复标准窗口大小、100% 透明度并关闭桌面固定；不会修改日期、任务或名称")
                 Spacer()
             }
             }.padding(24).frame(width: contentWidth, alignment: .leading)
@@ -688,6 +693,12 @@ private struct AppearanceSettingsView: View {
             Button("放弃修改", role: .destructive) { dismiss() }
             Button("保存并关闭") { if saveNames() { dismiss() } }
         }
+        .onAppear {
+            UnsavedNoteGuard.shared.register(editorTitle: "倒计时名称", editorObject: "修改后的倒计时名称") { saveNames() }
+            UnsavedNoteGuard.shared.setDirty(namesChanged)
+        }
+        .onChange(of: names) { _ in UnsavedNoteGuard.shared.setDirty(namesChanged) }
+        .onDisappear { UnsavedNoteGuard.shared.unregister() }
     }
 
     private var sheetViewport: CGSize {
@@ -704,12 +715,18 @@ private struct AppearanceSettingsView: View {
         catch { errorText = "透明度保存失败：\(error.localizedDescription)" }
     }
 
+    private func updateDesktopPin(_ value: Bool) {
+        do { try appearance.setPinnedToDesktop(value); errorText = nil }
+        catch { errorText = "桌面固定设置保存失败：\(error.localizedDescription)" }
+    }
+
     private func saveNames() -> Bool {
         do {
             try appearance.updateNames(names)
             names = Dictionary(uniqueKeysWithValues: EventKind.allCases.map { ($0.rawValue, appearance.name(for: $0)) })
             errorText = nil
             savedStatus = "名称已保存"
+            UnsavedNoteGuard.shared.setDirty(false)
             return true
         } catch {
             savedStatus = nil
@@ -724,6 +741,7 @@ private struct AppearanceSettingsView: View {
             names = Dictionary(uniqueKeysWithValues: EventKind.allCases.map { ($0.rawValue, appearance.name(for: $0)) })
             errorText = nil
             savedStatus = "已恢复默认名称"
+            UnsavedNoteGuard.shared.setDirty(false)
         } catch { errorText = "默认名称恢复失败：\(error.localizedDescription)" }
     }
 

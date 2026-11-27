@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"sort"
 	"strings"
@@ -99,6 +100,8 @@ const (
 	wmCommand          = 0x0111
 	wmHScroll          = 0x0114
 	wmTimer            = 0x0113
+	wmEnterSizeMove    = 0x0231
+	wmExitSizeMove     = 0x0232
 	wmSetFont          = 0x0030
 	wmTray             = 0x8001
 	wmLButtonUp        = 0x0202
@@ -165,6 +168,7 @@ const (
 	idTrayOpen         = 600
 	idTrayQuit         = 601
 	idOpacitySlider    = 703
+	idDesktopPin       = 704
 	idNameBase         = 710
 	idNamesSave        = 720
 	idNamesReset       = 721
@@ -183,6 +187,19 @@ type paintStruct struct {
 	Reserved           [32]byte
 }
 type point struct{ X, Y int32 }
+type controlFontRole uint8
+type controlLayout struct {
+	x, y, width, height int
+	font                controlFontRole
+}
+
+const (
+	fontNormal controlFontRole = iota
+	fontHeading
+	fontSmall
+	fontBold
+)
+
 type initCommonControls struct {
 	Size, Classes uint32
 }
@@ -222,11 +239,12 @@ var (
 	planner                                                                              Planner
 	appearance                                                                           Appearance
 	mainWnd, appIcon                                                                     uintptr
-	scale, systemScale                                                                   = 1.0, 1.0
+	scale, windowScale, systemScale                                                      = 1.0, 1.0, 1.0
 	workArea                                                                             rect
 	minOuterWidth, minOuterHeight, nonClientWidth, nonClientHeight                       int
 	normalFont, headingFont, smallFont, boldFont, bgBrush, sideBrush                     uintptr
 	heroFont, metricFont, symbolFont, pinButton, settingsButton, countdownDate           uintptr
+	todayDate                                                                            uintptr
 	view                                                                                 int
 	viewControls                                                                         [4][]uintptr
 	navControls                                                                          []uintptr
@@ -257,10 +275,14 @@ var (
 	settingsControls                                                                     []uintptr
 	nameEdits                                                                            [5]uintptr
 	opacitySlider, opacityLabel, todayHint, noteHint                                     uintptr
+	desktopPinControl                                                                    uintptr
 	settingsStatus                                                                       uintptr
 	settingsOpen, windowReady, sizeSavePending, opacitySavePending                       bool
+	resizingWindow                                                                       bool
 	previewOpacity                                                                       float64
 	trayAdded, exiting                                                                   bool
+	controlLayouts                                                                       = map[uintptr]controlLayout{}
+	fontPixelHeights                                                                     [7]int
 )
 
 func w(s string) *uint16          { p, _ := syscall.UTF16PtrFromString(s); return p }
@@ -288,10 +310,43 @@ func message(h uintptr, s string, flags uintptr) uintptr {
 }
 func create(class, text string, style, ex uintptr, x, y, wid, hei, id int) uintptr {
 	h, _, _ := pCreateWindow.Call(ex, uintptr(unsafe.Pointer(w(class))), uintptr(unsafe.Pointer(w(text))), style|wsChild|wsVisible, px(x), px(y), px(wid), px(hei), mainWnd, uintptr(id), 0, 0)
-	pSendMessage.Call(h, wmSetFont, normalFont, 1)
+	if h != 0 {
+		controlLayouts[h] = controlLayout{x: x, y: y, width: wid, height: hei, font: fontNormal}
+		pSendMessage.Call(h, wmSetFont, normalFont, 1)
+	}
 	return h
 }
-func font(h, f uintptr) { pSendMessage.Call(h, wmSetFont, f, 1) }
+func fontRoleForHandle(f uintptr) controlFontRole {
+	switch {
+	case f != 0 && f == headingFont:
+		return fontHeading
+	case f != 0 && f == smallFont:
+		return fontSmall
+	case f != 0 && f == boldFont:
+		return fontBold
+	default:
+		return fontNormal
+	}
+}
+func fontHandle(role controlFontRole) uintptr {
+	switch role {
+	case fontHeading:
+		return headingFont
+	case fontSmall:
+		return smallFont
+	case fontBold:
+		return boldFont
+	default:
+		return normalFont
+	}
+}
+func font(h, f uintptr) {
+	if spec, ok := controlLayouts[h]; ok {
+		spec.font = fontRoleForHandle(f)
+		controlLayouts[h] = spec
+	}
+	pSendMessage.Call(h, wmSetFont, f, 1)
+}
 func setVisible(a []uintptr, on bool) {
 	c := uintptr(swHide)
 	if on {
@@ -347,6 +402,14 @@ func taskByID(id string) (Task, bool) {
 	}
 	return Task{}, false
 }
+
+func taskIndex() map[string]Task {
+	index := make(map[string]Task, len(planner.Tasks))
+	for _, task := range planner.Tasks {
+		index[task.ID] = task
+	}
+	return index
+}
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -359,7 +422,8 @@ func max(a, b int) int {
 	}
 	return b
 }
-func logical(v int32) int { return int(float64(v)/scale + .5) }
+func windowLogical(v int32) int { return int(float64(v)/windowScale + .5) }
+func windowPx(v int) uintptr    { return uintptr(int(float64(v)*windowScale + .5)) }
 func moveControl(h uintptr, x, y, wid, hei int) {
 	if h != 0 {
 		pMoveWindow.Call(h, px(x), px(y), px(wid), px(hei), 1)
@@ -395,13 +459,14 @@ func configureWindowGeometry() {
 		nonClientHeight = max(nonClientHeight, int(probe.Bottom-probe.Top)-100)
 	}
 	fit := fitGeometry(int(workArea.Right-workArea.Left), int(workArea.Bottom-workArea.Top), systemScale, nonClientWidth, nonClientHeight)
-	scale = fit.Scale
+	windowScale = fit.Scale
+	scale = windowScale
 	minOuterWidth, minOuterHeight = fit.MinOuterWidth, fit.MinOuterHeight
 }
 func windowOuterForLogical(width, height int) (int, int) {
 	workWidth, workHeight := int(workArea.Right-workArea.Left), int(workArea.Bottom-workArea.Top)
-	physicalWidth := max(minOuterWidth, int(float64(width)*scale+.5))
-	physicalHeight := max(minOuterHeight, int(float64(height)*scale+.5))
+	physicalWidth := max(minOuterWidth, int(float64(width)*windowScale+.5))
+	physicalHeight := max(minOuterHeight, int(float64(height)*windowScale+.5))
 	return min(workWidth, physicalWidth), min(workHeight, physicalHeight)
 }
 func applyOpacity(value float64) {
@@ -414,12 +479,13 @@ func applyOpacity(value float64) {
 	previewOpacity = value
 	alpha := uintptr(value*255 + .5)
 	pSetLayeredAlpha.Call(mainWnd, 0, alpha, 0x2)
+	applyDesktopOpacity(value)
 	if opacityLabel != 0 {
 		setText(opacityLabel, fmt.Sprintf("透明度：%d%%", int(value*100+.5)))
 	}
 }
 func saveCurrentWindowSize() {
-	if !windowReady || mainWnd == 0 {
+	if !windowReady || mainWnd == 0 || appearance.blocked {
 		return
 	}
 	zoomed, _, _ := pIsZoomed.Call(mainWnd)
@@ -431,7 +497,8 @@ func saveCurrentWindowSize() {
 	if ok, _, _ := pGetWindowRect.Call(mainWnd, uintptr(unsafe.Pointer(&r))); ok == 0 {
 		return
 	}
-	wid, hei := logical(r.Right-r.Left), logical(r.Bottom-r.Top)
+	wid := max(minWindowWidth, min(maxWindowWidth, windowLogical(r.Right-r.Left)))
+	hei := max(minWindowHeight, min(maxWindowHeight, windowLogical(r.Bottom-r.Top)))
 	if wid == appearance.Width && hei == appearance.Height {
 		return
 	}
@@ -449,9 +516,73 @@ func savePreviewOpacity() {
 	}
 }
 
+func scaledFontHeight(base int) int {
+	return max(1, int(float64(base)*scale+.5))
+}
+func createFontHandle(height, weight int, face string) uintptr {
+	h, _, _ := pCreateFont.Call(^uintptr(height-1), 0, 0, 0, uintptr(weight), 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w(face))))
+	return h
+}
+func updateFontsForScale() {
+	heights := [7]int{
+		scaledFontHeight(17), scaledFontHeight(27), scaledFontHeight(13), scaledFontHeight(18),
+		scaledFontHeight(41), scaledFontHeight(21), scaledFontHeight(18),
+	}
+	if heights == fontPixelHeights {
+		return
+	}
+	next := [7]uintptr{
+		createFontHandle(heights[0], 400, "Microsoft YaHei UI"),
+		createFontHandle(heights[1], 600, "Microsoft YaHei UI"),
+		createFontHandle(heights[2], 400, "Microsoft YaHei UI"),
+		createFontHandle(heights[3], 600, "Microsoft YaHei UI"),
+		createFontHandle(heights[4], 700, "Microsoft YaHei UI"),
+		createFontHandle(heights[5], 600, "Microsoft YaHei UI"),
+		createFontHandle(heights[6], 400, "Segoe UI Symbol"),
+	}
+	for _, h := range next {
+		if h == 0 {
+			for _, made := range next {
+				if made != 0 {
+					pDeleteObject.Call(made)
+				}
+			}
+			return
+		}
+	}
+	old := [7]uintptr{normalFont, headingFont, smallFont, boldFont, heroFont, metricFont, symbolFont}
+	normalFont, headingFont, smallFont, boldFont = next[0], next[1], next[2], next[3]
+	heroFont, metricFont, symbolFont = next[4], next[5], next[6]
+	fontPixelHeights = heights
+	for h, spec := range controlLayouts {
+		pSendMessage.Call(h, wmSetFont, fontHandle(spec.font), 1)
+	}
+	for _, h := range old {
+		if h != 0 {
+			pDeleteObject.Call(h)
+		}
+	}
+}
 func layoutControls(clientWidth, clientHeight int) {
+	if clientWidth < 1 || clientHeight < 1 {
+		return
+	}
+	nextScale := contentScale(clientWidth, clientHeight, windowScale)
+	if math.IsNaN(nextScale) || math.IsInf(nextScale, 0) || nextScale <= 0 {
+		nextScale = windowScale
+	}
+	if nextScale != scale {
+		scale = nextScale
+		updateFontsForScale()
+		for h, spec := range controlLayouts {
+			moveControl(h, spec.x, spec.y, spec.width, spec.height)
+		}
+	}
+	clientWidth = max(baseClientWidth, int(float64(clientWidth)/scale+.5))
+	clientHeight = max(baseClientHeight, int(float64(clientHeight)/scale+.5))
 	// These are the client dimensions of the original 760x700 window at 96
-	// DPI. The minimum outer size keeps every original control visible.
+	// DPI. At smaller sizes every control is scaled from its creation rectangle;
+	// at larger sizes the existing stretch rules still use the extra space.
 	dw := max(0, clientWidth-744)
 	dh := max(0, clientHeight-661)
 	moveControl(settingsButton, 12, clientHeight-52, 118, 38)
@@ -634,6 +765,8 @@ func resetVisuals() {
 		message(mainWnd, "恢复默认外观失败："+err.Error(), 0x10)
 		return
 	}
+	hideDesktopWidget()
+	pSendMessage.Call(desktopPinControl, bmSetCheck, 0, 0)
 	pKillTimer.Call(mainWnd, idTimerOpacitySave)
 	opacitySavePending = false
 	previewOpacity = appearance.Opacity
@@ -670,6 +803,7 @@ func refreshCountdown() {
 		setText(countdownButtons[i], s)
 		pInvalidateRect.Call(countdownButtons[i], 0, 0)
 	}
+	refreshDesktopWidget()
 }
 
 func invalidateNavigation() {
@@ -678,10 +812,12 @@ func invalidateNavigation() {
 	}
 }
 func refreshToday() {
+	now := time.Now()
+	setText(todayDate, now.Format("2006年01月02日"))
 	selected, hasSelection := selectedRef(todayList, todayRefs)
 	listReset(todayList)
 	todayRefs = todayRefs[:0]
-	today := civil(time.Now()).Format("2006-01-02")
+	today := civil(now).Format("2006-01-02")
 	show, _, _ := pSendMessage.Call(showCompleted, bmGetCheck, 0, 0)
 	horizon, includeOverdue, includeUnscheduled := 1, true, true
 	setText(modeTodayButton, "● 今日")
@@ -698,9 +834,10 @@ func refreshToday() {
 		priority bool
 	}
 	rows := []row{}
+	tasks := taskIndex()
 	items := SelectTaskListOccurrences(planner.Tasks, today, horizon, getText(todaySearch), includeOverdue, includeUnscheduled)
 	for _, item := range items {
-		t, ok := taskByID(item.TaskID)
+		t, ok := tasks[item.TaskID]
 		if !ok {
 			continue
 		}
@@ -770,7 +907,7 @@ func refreshCalendar() {
 	calendarRefs = TasksForDate(planner.Tasks, selectedDate)
 	setText(calendarSelectedLabel, fmt.Sprintf("%s · %d 项待办", calendarSelected.Format("01月02日"), len(calendarRefs)))
 	for i, day := range MonthGrid(calendarMonth, time.Now()) {
-		count := len(TasksForDate(planner.Tasks, day.Date))
+		count := countTasksForDate(planner.Tasks, day.Date)
 		badge := countdownBadge(day.Date)
 		calendarDaysPaint[i] = calendarDayPaint{
 			number: fmt.Sprint(day.Day), inMonth: day.InMonth, today: day.IsToday,
@@ -790,8 +927,9 @@ func refreshCalendar() {
 		pInvalidateRect.Call(calendarDays[i], 0, 0)
 	}
 	listReset(calendarList)
+	tasks := taskIndex()
 	for i, r := range calendarRefs {
-		t, _ := taskByID(r.TaskID)
+		t := tasks[r.TaskID]
 		m := "○ "
 		if IsTaskCompleted(t, r.Date) {
 			m = "✓ "
@@ -806,10 +944,6 @@ func refreshCalendar() {
 	}
 }
 func refreshNotes() {
-	selectedID := ""
-	if i := listSel(noteList); i >= 0 && i < len(noteRefs) {
-		selectedID = noteRefs[i]
-	}
 	listReset(noteList)
 	noteRefs = noteRefs[:0]
 	q := strings.ToLower(strings.TrimSpace(getText(noteSearch)))
@@ -823,7 +957,7 @@ func refreshNotes() {
 		if q == "" || strings.Contains(strings.ToLower(n.Title), q) || strings.Contains(strings.ToLower(n.Body), q) {
 			listAdd(noteList, n.Title)
 			noteRefs = append(noteRefs, n.ID)
-			if n.ID == selectedID {
+			if n.ID == editingNoteID {
 				pSendMessage.Call(noteList, lbSetCurSel, uintptr(len(noteRefs)-1), 0)
 			}
 		}
@@ -1003,7 +1137,7 @@ func selectCalendarDay(i int) string {
 
 func loadSelectedNote() {
 	i := listSel(noteList)
-	if i < 0 || i >= len(noteRefs) {
+	if i < 0 || i >= len(noteRefs) || noteRefs[i] == editingNoteID {
 		return
 	}
 	if !confirmDiscardNote() {
@@ -1020,10 +1154,10 @@ func loadSelectedNote() {
 	for _, n := range planner.Notes {
 		if n.ID == noteRefs[i] {
 			editingNoteID = n.ID
-			noteSavedTitle = n.Title
-			noteSavedBody = n.Body
 			setText(noteTitle, n.Title)
 			setText(noteBody, n.Body)
+			noteSavedTitle = getText(noteTitle)
+			noteSavedBody = getText(noteBody)
 			return
 		}
 	}
@@ -1033,6 +1167,7 @@ func newNote() {
 		return
 	}
 	editingNoteID = ""
+	pSendMessage.Call(noteList, lbSetCurSel, ^uintptr(0), 0)
 	noteSavedTitle = ""
 	noteSavedBody = ""
 	setText(noteTitle, "")
@@ -1055,13 +1190,16 @@ func saveNote() {
 	}
 	editingNoteID = id
 	noteSavedTitle = strings.TrimSpace(n.Title)
-	noteSavedBody = strings.TrimSpace(n.Body)
+	noteSavedBody = n.Body
 	setText(noteTitle, noteSavedTitle)
 	setText(noteBody, noteSavedBody)
+	if n.ID == "" {
+		setText(noteSearch, "")
+	}
 	refreshNotes()
 }
 func deleteNote() {
-	if editingNoteID == "" || message(mainWnd, "删除这条笔记？由它生成的任务会保留。", 0x04|0x20) != 6 {
+	if editingNoteID == "" || message(mainWnd, "删除笔记“"+noteSavedTitle+"”？由它生成的任务会保留。", 0x04|0x20) != 6 {
 		return
 	}
 	if err := planner.DeleteNote(editingNoteID); err != nil {
@@ -1243,6 +1381,16 @@ func handleCommand(id int, n uint16) {
 		resetVisuals()
 	case idSettingsBack:
 		closeSettings()
+	case idDesktopPin:
+		check, _, _ := pSendMessage.Call(desktopPinControl, bmGetCheck, 0, 0)
+		if err := changeDesktopPin(check == 1); err != nil {
+			var previous uintptr
+			if appearance.DesktopPinned {
+				previous = 1
+			}
+			pSendMessage.Call(desktopPinControl, bmSetCheck, previous, 0)
+			message(mainWnd, "桌面固定设置失败："+err.Error(), 0x10)
+		}
 	case idDateSave:
 		saveDateEditor()
 	case idDateCancel:
@@ -1331,7 +1479,7 @@ func wndProc(hwnd uintptr, m uint32, wp, lp uintptr) uintptr {
 	case wmGetMinMaxInfo:
 		if lp != 0 {
 			minimum := point{int32(minOuterWidth), int32(minOuterHeight)}
-			maximum := point{int32(px(maxWindowWidth)), int32(px(maxWindowHeight))}
+			maximum := point{int32(windowPx(maxWindowWidth)), int32(windowPx(maxWindowHeight))}
 			// MINMAXINFO.MinTrackSize follows three POINT fields. Copying via
 			// Win32 avoids retaining callback-owned memory as a Go pointer.
 			pCopyMemory.Call(lp+3*unsafe.Sizeof(point{}), uintptr(unsafe.Pointer(&minimum)), unsafe.Sizeof(minimum))
@@ -1340,11 +1488,24 @@ func wndProc(hwnd uintptr, m uint32, wp, lp uintptr) uintptr {
 		return 0
 	case wmSize:
 		if wp != 1 && mainWnd != 0 { // SIZE_MINIMIZED
-			layoutControls(logical(int32(lp&0xffff)), logical(int32((lp>>16)&0xffff)))
-			if windowReady {
+			layoutControls(int(lp&0xffff), int((lp>>16)&0xffff))
+			if windowReady && wp == 0 { // SIZE_RESTORED
 				sizeSavePending = true
-				pSetTimer.Call(mainWnd, idTimerWindowSave, 400, 0)
+				if !resizingWindow {
+					pSetTimer.Call(mainWnd, idTimerWindowSave, 400, 0)
+				}
 			}
+		}
+		return 0
+	case wmEnterSizeMove:
+		resizingWindow = true
+		pKillTimer.Call(hwnd, idTimerWindowSave)
+		return 0
+	case wmExitSizeMove:
+		resizingWindow = false
+		if sizeSavePending {
+			sizeSavePending = false
+			saveCurrentWindowSize()
 		}
 		return 0
 	case wmDrawItem:
@@ -1389,7 +1550,7 @@ func wndProc(hwnd uintptr, m uint32, wp, lp uintptr) uintptr {
 	case wmTimer:
 		if wp == idTimerWindowSave {
 			pKillTimer.Call(mainWnd, idTimerWindowSave)
-			if sizeSavePending {
+			if sizeSavePending && !resizingWindow {
 				sizeSavePending = false
 				saveCurrentWindowSize()
 			}
@@ -1414,6 +1575,7 @@ func wndProc(hwnd uintptr, m uint32, wp, lp uintptr) uintptr {
 		requestExit()
 		return 0
 	case wmDestroy:
+		hideDesktopWidget()
 		removeTray()
 		pPostQuit.Call(0)
 		return 0
@@ -1449,7 +1611,8 @@ func buildControls() {
 		v0 = append(v0, h)
 	}
 	viewControls[0] = v0
-	v1 := []uintptr{static("今天", 166, 24, 160, 40, true), static(time.Now().Format("2006年01月02日"), 166, 64, 220, 25, false)}
+	todayDate = static("", 166, 64, 220, 25, false)
+	v1 := []uintptr{static("今天", 166, 24, 160, 40, true), todayDate}
 	quickTitle = edit("", 166, 100, 438, 34, idQuickTitle, false)
 	v1 = append(v1, quickTitle, button("添加到今天", 614, 100, 104, 34, idQuickAdd))
 	v1 = append(v1, static("搜索", 166, 150, 48, 25, false))
@@ -1518,7 +1681,7 @@ func buildControls() {
 	pSendMessage.Call(taskRepeat, cbSetCurSel, 0, 0)
 	taskPriority = create("BUTTON", "星标优先", wsTabstop|3, 0, 428, 446, 130, 30, idTaskPriority)
 	taskEditor = append(taskEditor, taskRepeat, taskPriority, button("保存任务", 180, 522, 112, 40, idTaskSave), button("取消", 302, 522, 92, 40, idTaskCancel))
-	hh := static("提醒只在有盼运行时生效；关闭窗口仍运行，退出后停止。", 180, 582, 500, 26, false)
+	hh := static("提醒只在有盼运行时生效；最小化后继续，退出后停止。", 180, 582, 500, 26, false)
 	font(hh, smallFont)
 	taskEditor = append(taskEditor, hh)
 	setVisible(taskEditor, false)
@@ -1531,6 +1694,13 @@ func buildControls() {
 	pSendMessage.Call(opacitySlider, 0x406, 1, uintptr(100<<16|50)) // TBM_SETRANGE
 	pSendMessage.Call(opacitySlider, 0x405, 1, uintptr(int(appearance.Opacity*100+.5)))
 	settingsControls = append(settingsControls, opacityLabel, opacitySlider, static("50%", 166, 228, 48, 22, false), static("100%", 536, 228, 52, 22, false))
+	desktopPinControl = create("BUTTON", "固定在桌面", wsTabstop|3, 0, 390, 156, 220, 29, idDesktopPin)
+	if appearance.DesktopPinned {
+		pSendMessage.Call(desktopPinControl, bmSetCheck, 1, 0)
+	}
+	desktopHint := static("桌面倒计时面板使用同一透明度，可拖动位置。", 166, 247, 500, 18, false)
+	font(desktopHint, smallFont)
+	settingsControls = append(settingsControls, desktopPinControl, desktopHint)
 	settingsControls = append(settingsControls, static("倒计时名称（1–24 个字符）", 166, 265, 300, 28, false))
 	for i, k := range Events {
 		y := 302 + i*46
@@ -1614,15 +1784,9 @@ func main() {
 		message(0, "无法注册应用窗口。", 0x10)
 		return
 	}
-	normalFont, _, _ = pCreateFont.Call(^uintptr(px(17)-1), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Microsoft YaHei UI"))))
-	headingFont, _, _ = pCreateFont.Call(^uintptr(px(27)-1), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Microsoft YaHei UI"))))
-	smallFont, _, _ = pCreateFont.Call(^uintptr(px(13)-1), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Microsoft YaHei UI"))))
-	boldFont, _, _ = pCreateFont.Call(^uintptr(px(18)-1), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Microsoft YaHei UI"))))
+	updateFontsForScale()
 	bgBrush, _, _ = pCreateSolidBrush.Call(rgb(244, 247, 251))
 	sideBrush, _, _ = pCreateSolidBrush.Call(rgb(234, 239, 245))
-	heroFont, _, _ = pCreateFont.Call(^uintptr(px(41)-1), 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Microsoft YaHei UI"))))
-	metricFont, _, _ = pCreateFont.Call(^uintptr(px(21)-1), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Microsoft YaHei UI"))))
-	symbolFont, _, _ = pCreateFont.Call(^uintptr(px(18)-1), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(w("Segoe UI Symbol"))))
 	defer func() {
 		for _, h := range []uintptr{normalFont, headingFont, smallFont, boldFont, heroFont, metricFont, symbolFont, bgBrush, sideBrush} {
 			if h != 0 {
@@ -1646,7 +1810,7 @@ func main() {
 	buildControls()
 	var client rect
 	if ok, _, _ := pGetClientRect.Call(mainWnd, uintptr(unsafe.Pointer(&client))); ok != 0 {
-		layoutControls(logical(client.Right-client.Left), logical(client.Bottom-client.Top))
+		layoutControls(int(client.Right-client.Left), int(client.Bottom-client.Top))
 	}
 	applyOpacity(appearance.Opacity)
 	windowReady = true
@@ -1655,6 +1819,11 @@ func main() {
 	pSetTimer.Call(mainWnd, 1, 30000, 0)
 	pShowWindow.Call(mainWnd, swShow)
 	pUpdateWindow.Call(mainWnd)
+	if appearance.DesktopPinned {
+		if err := showDesktopWidget(); err != nil {
+			message(mainWnd, "未能显示桌面倒计时："+err.Error(), 0x30)
+		}
+	}
 	checkReminders()
 	var m msg
 	for {

@@ -451,22 +451,25 @@ func LoadPlanner() (Planner, error) {
 	return loadPlannerPath(p)
 }
 
-func loadPlannerPath(p string) (Planner, error) {
+func readJSONFile(p string) ([]byte, error) {
 	b, err := os.ReadFile(p)
-	if errors.Is(err, os.ErrNotExist) {
-		// A prior save may have been interrupted after moving the old file aside.
-		// Never interpret that recoverable state as an empty new planner.
-		backup := p + ".bak"
-		if bb, backupErr := os.ReadFile(backup); backupErr == nil {
-			if renameErr := os.Rename(backup, p); renameErr != nil {
-				return Planner{path: p, blocked: true}, fmt.Errorf("恢复计划数据备份失败: %w", renameErr)
-			}
-			b = bb
-			err = nil
-		} else if !errors.Is(backupErr, os.ErrNotExist) {
-			return Planner{path: p, blocked: true}, fmt.Errorf("读取计划数据备份失败: %w", backupErr)
-		}
+	if !errors.Is(err, os.ErrNotExist) {
+		return b, err
 	}
+	// Older releases moved the primary file aside before replacing it.
+	backup := p + ".bak"
+	b, err = os.ReadFile(backup)
+	if err != nil {
+		return nil, err
+	}
+	if err = os.Rename(backup, p); err != nil {
+		return nil, fmt.Errorf("恢复数据备份失败: %v", err)
+	}
+	return b, nil
+}
+
+func loadPlannerPath(p string) (Planner, error) {
+	b, err := readJSONFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		v := defaultPlanner()
 		v.path = p
@@ -474,6 +477,16 @@ func loadPlannerPath(p string) (Planner, error) {
 	}
 	if err != nil {
 		return Planner{path: p, blocked: true}, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return Planner{path: p, blocked: true}, fmt.Errorf("读取计划数据失败: %w", err)
+	}
+	if fields["schemaVersion"] != nil {
+		return Planner{path: p, blocked: true}, errors.New("计划文件使用不同的数据格式，未进行覆盖")
+	}
+	if fields["tasks"] == nil || fields["notes"] == nil {
+		return Planner{path: p, blocked: true}, errors.New("计划数据缺少任务列表或笔记列表")
 	}
 	var v Planner
 	if err := json.Unmarshal(b, &v); err != nil {
@@ -615,7 +628,7 @@ func writeJSONFile(p string, value any) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(dir, ".planner-*.tmp")
+	f, err := os.CreateTemp(dir, ".settings-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -632,21 +645,9 @@ func writeJSONFile(p string, value any) error {
 	if err = f.Close(); err != nil {
 		return err
 	}
-	// Windows does not replace an existing destination with os.Rename. Keep a
-	// recoverable .bak during replacement instead of deleting the old file first.
-	backup := p + ".bak"
-	_ = os.Remove(backup)
-	if _, err := os.Stat(p); err == nil {
-		if err = os.Rename(p, backup); err != nil {
-			return err
-		}
-	}
-	if err = os.Rename(tmp, p); err != nil {
-		_ = os.Rename(backup, p)
-		return err
-	}
-	_ = os.Remove(backup)
-	return nil
+	// Renaming within the same directory replaces the primary file without
+	// first removing it. Go uses MoveFileEx with REPLACE_EXISTING on Windows.
+	return os.Rename(tmp, p)
 }
 
 func (p *Planner) save(next Planner) error {
@@ -766,16 +767,20 @@ func (p *Planner) SetTaskCompleted(id, occurrence string, completed bool) error 
 
 func TaskOccursOn(t Task, date string) bool {
 	day, err := parseDate(date)
-	if err != nil || t.Date == "" {
+	return err == nil && taskOccursOnDay(t, day)
+}
+
+func taskOccursOnDay(t Task, day time.Time) bool {
+	if t.Date == "" {
 		return false
 	}
-	start, _ := parseDate(t.Date)
-	if day.Before(start) {
+	start, err := parseDate(t.Date)
+	if err != nil || day.Before(start) {
 		return false
 	}
 	switch t.Repeat {
 	case RepeatNone:
-		return date == t.Date
+		return day.Equal(start)
 	case RepeatDaily:
 		return true
 	case RepeatWeekdays:
@@ -787,28 +792,42 @@ func TaskOccursOn(t Task, date string) bool {
 }
 
 func TasksForDate(tasks []Task, date string) []TaskOccurrence {
-	out := []TaskOccurrence{}
+	day, err := parseDate(date)
+	if err != nil {
+		return []TaskOccurrence{}
+	}
+	matching := []Task{}
 	for _, t := range tasks {
-		if TaskOccursOn(t, date) {
-			out = append(out, TaskOccurrence{TaskID: t.ID, Date: date})
+		if taskOccursOnDay(t, day) {
+			matching = append(matching, t)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		var a, b Task
-		for _, t := range tasks {
-			if t.ID == out[i].TaskID {
-				a = t
-			}
-			if t.ID == out[j].TaskID {
-				b = t
-			}
-		}
+	sort.SliceStable(matching, func(i, j int) bool {
+		a, b := matching[i], matching[j]
 		if a.Priority != b.Priority {
 			return a.Priority
 		}
 		return a.Title < b.Title
 	})
+	out := make([]TaskOccurrence, 0, len(matching))
+	for _, t := range matching {
+		out = append(out, TaskOccurrence{TaskID: t.ID, Date: date})
+	}
 	return out
+}
+
+func countTasksForDate(tasks []Task, date string) int {
+	day, err := parseDate(date)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, t := range tasks {
+		if taskOccursOnDay(t, day) {
+			count++
+		}
+	}
+	return count
 }
 
 // SelectTaskListOccurrences is the single selection source for the Today
@@ -834,9 +853,10 @@ func SelectTaskListOccurrences(tasks []Task, today string, horizon int, query st
 		}
 	}
 	for offset := 0; offset < horizon; offset++ {
-		date := start.AddDate(0, 0, offset).Format("2006-01-02")
+		day := start.AddDate(0, 0, offset)
+		date := day.Format("2006-01-02")
 		for _, t := range tasks {
-			if matches(t) && TaskOccursOn(t, date) {
+			if matches(t) && taskOccursOnDay(t, day) {
 				out = append(out, TaskListOccurrence{TaskID: t.ID, Date: date, DayOffset: offset, Category: "scheduled"})
 			}
 		}
@@ -853,7 +873,6 @@ func SelectTaskListOccurrences(tasks []Task, today string, horizon int, query st
 
 func (p *Planner) UpsertNote(n Note, now time.Time) (string, error) {
 	n.Title = strings.TrimSpace(n.Title)
-	n.Body = strings.TrimSpace(n.Body)
 	stamp := now.Format(time.RFC3339)
 	if n.ID == "" {
 		n.ID = newID("note", now)
