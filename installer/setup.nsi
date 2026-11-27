@@ -10,10 +10,10 @@ RequestExecutionLevel user
 SetCompressor /SOLID lzma
 ShowInstDetails nevershow
 ShowUninstDetails nevershow
-VIProductVersion "2.1.1.0"
+VIProductVersion "2.2.0.0"
 VIAddVersionKey /LANG=2052 "ProductName" "有盼"
 VIAddVersionKey /LANG=2052 "FileDescription" "有盼 · Windows 安装程序"
-VIAddVersionKey /LANG=2052 "FileVersion" "2.1.1"
+VIAddVersionKey /LANG=2052 "FileVersion" "2.2.0"
 VIAddVersionKey /LANG=2052 "LegalCopyright" ""
 !define APPKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\DaysCountdown.Desktop"
 !define MUI_ICON "Calendar.ico"
@@ -78,7 +78,7 @@ Section
   CreateShortcut "$DESKTOP\有盼.lnk" "$INSTDIR\DaysCountdown.exe"
   CreateShortcut "$SMPROGRAMS\有盼.lnk" "$INSTDIR\DaysCountdown.exe"
   WriteRegStr HKCU "${APPKEY}" "DisplayName" "有盼"
-  WriteRegStr HKCU "${APPKEY}" "DisplayVersion" "2.1.1"
+  WriteRegStr HKCU "${APPKEY}" "DisplayVersion" "2.2.0"
   WriteRegStr HKCU "${APPKEY}" "DisplayIcon" "$INSTDIR\DaysCountdown.exe"
   WriteRegStr HKCU "${APPKEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${APPKEY}" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'

@@ -2,10 +2,11 @@ import SwiftUI
 import AppKit
 import Combine
 
-private let ink = Color(red: 0.114, green: 0.114, blue: 0.122)
-private let secondaryInk = Color(red: 0.408, green: 0.420, blue: 0.451)
-private let paper = Color(red: 0.961, green: 0.969, blue: 0.985)
-private let macBlue = Color(red: 0.0, green: 0.478, blue: 1.0)
+private let ink = Color(red: 0.11, green: 0.16, blue: 0.24)
+private let secondaryInk = Color(red: 0.33, green: 0.39, blue: 0.48)
+private let paper = Color(red: 0.955, green: 0.968, blue: 0.984)
+private let macBlue = Color(red: 0.04, green: 0.35, blue: 0.78)
+private let dividerInk = Color(red: 0.87, green: 0.90, blue: 0.94)
 private let sidebarPaper = Color(red: 0.92, green: 0.94, blue: 0.96)
 
 private enum AppSection: String, CaseIterable, Identifiable {
@@ -281,7 +282,15 @@ private struct TodayView: View {
     }
     private var dateHeading: String { let f = DateFormatter(); f.locale = Locale(identifier: "zh_CN"); f.dateFormat = "M月d日 EEEE"; return f.string(from: now) }
     private func agendaHeading(_ value: String) -> String { guard let date = CountdownMath.date(value) else { return value }; let f = DateFormatter(); f.locale = Locale(identifier: "zh_CN"); f.dateFormat = "M月d日 EEEE"; return f.string(from: date) }
-    private func addQuick() { let value = quickTitle.trimmingCharacters(in: .whitespacesAndNewlines); guard !value.isEmpty else { return }; do { try planner.addTask(PlannerTask(title: value, startDate: day)); quickTitle = "" } catch { errorText = error.localizedDescription } }
+    private func addQuick() {
+        let value = quickTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        do {
+            try planner.addTask(PlannerTask(title: value, startDate: day))
+            quickTitle = ""
+            query = ""
+        } catch { errorText = error.localizedDescription }
+    }
 }
 
 private struct TaskSection: View {
@@ -322,43 +331,109 @@ private struct TaskRow: View {
 }
 
 private struct PlannerCalendarView: View {
+    private struct NewTaskDay: Identifiable {
+        let id: String
+    }
+
     @ObservedObject var planner: PlannerStore
     @ObservedObject var countdown: CountdownStore
     @ObservedObject var appearance: AppearanceStore
     @State(wrappedValue: Date()) private var visibleMonth: Date
     @State(wrappedValue: Date()) private var selectedDay: Date
     @State(wrappedValue: nil) private var editorTask: PlannerTask?
-    @State(wrappedValue: false) private var showingNew: Bool
+    @State(wrappedValue: nil) private var newTaskDay: NewTaskDay?
     @State(wrappedValue: nil) private var errorText: String?
-    private let weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+    private let weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     var body: some View {
         let grid = CalendarGrid(containing: visibleMonth), key = TaskSchedule.ymd(selectedDay), dayTasks = planner.tasks.filter { TaskSchedule.occurs($0, on: key) }
         VStack(alignment: .leading, spacing: 0) {
-            PageHeader(title: "日历", subtitle: monthTitle) { Button("今天") { visibleMonth = Date(); selectedDay = Date() }.accessibilityLabel("回到今天"); Button { changeMonth(-1) } label: { Image(systemName: "chevron.left") }.accessibilityLabel("上个月"); Button { changeMonth(1) } label: { Image(systemName: "chevron.right") }.accessibilityLabel("下个月") }
+            PageHeader(title: "日历", subtitle: "双击日期添加待办") {
+                Button("今天") { visibleMonth = Date(); selectedDay = Date() }.accessibilityLabel("回到今天")
+            }
             ScrollView {
-                VStack(spacing: 14) {
-                    HStack(spacing: 4) { ForEach(weekdays, id: \.self) { Text($0).font(.caption).foregroundColor(secondaryInk).frame(maxWidth: .infinity) } }
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 5), count: 7), spacing: 5) { ForEach(grid.days, id: \.self) { calendarCell($0, month: grid.monthStart) } }
-                    Divider(); HStack { Text(selectedTitle).font(.headline); Spacer(); Button { showingNew = true } label: { Label("在这一天添加", systemImage: "plus") }.accessibilityLabel("在选中日期添加待办") }
-                    VStack(spacing: 8) { if dayTasks.isEmpty { Text("这一天没有待办").foregroundColor(secondaryInk).frame(maxWidth: .infinity).padding(20) }; ForEach(dayTasks) { task in TaskRow(task: task, occurrenceDay: key, planner: planner, edit: { editorTask = task }, errorText: $errorText) } }
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(spacing: 8) {
+                        HStack {
+                            Text(monthTitle).font(.system(size: 19, weight: .semibold)).monospacedDigit()
+                            Spacer()
+                            monthButton(-1, icon: "chevron.left", label: "上个月")
+                            monthButton(1, icon: "chevron.right", label: "下个月")
+                        }.padding(.bottom, 3)
+                        HStack(spacing: 4) {
+                            ForEach(weekdays, id: \.self) { weekday in
+                                Text(weekday).font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(secondaryInk).frame(maxWidth: .infinity)
+                            }
+                        }
+                        Rectangle().fill(dividerInk).frame(height: 1).accessibilityHidden(true)
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 3) {
+                            ForEach(grid.days, id: \.self) { calendarCell($0, month: grid.monthStart) }
+                        }
+                    }.padding(14).background(Color.white).clipShape(RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(dividerInk))
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(selectedTitle).font(.system(size: 16, weight: .semibold)).lineLimit(1)
+                            Text("\(dayTasks.count) 项待办").font(.caption).foregroundColor(secondaryInk)
+                        }
+                        Spacer()
+                        Button { startTask(on: selectedDay) } label: { Label("新建待办", systemImage: "plus") }
+                            .buttonStyle(.borderedProminent).controlSize(.regular).accessibilityLabel("在选中日期添加待办")
+                    }
+                    ForEach(dayTasks) { task in
+                        TaskRow(task: task, occurrenceDay: key, planner: planner, edit: { editorTask = task }, errorText: $errorText)
+                    }
                 }.padding(24)
             }
-        }.sheet(isPresented: $showingNew) { TaskEditor(planner: planner, initialDate: key) }.sheet(item: $editorTask) { TaskEditor(planner: planner, task: $0, initialDate: key) }
+        }.sheet(item: $newTaskDay) { day in
+            TaskEditor(planner: planner, initialDate: day.id)
+        }.sheet(item: $editorTask) { TaskEditor(planner: planner, task: $0, initialDate: key) }
         .alert("提示", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) { Button("好", role: .cancel) {} } message: { Text(errorText ?? "") }
     }
     private func calendarCell(_ date: Date, month: Date) -> some View {
         let key = TaskSchedule.ymd(date), selected = Calendar.current.isDate(date, inSameDayAs: selectedDay), inMonth = Calendar.current.component(.month, from: date) == Calendar.current.component(.month, from: month)
+        let today = Calendar.current.isDateInToday(date)
         let count = planner.tasks.filter { TaskSchedule.occurs($0, on: key) }.count
         let badges = countdown.selections.compactMap { entry -> String? in
             guard entry.value.start == key, let kind = EventKind(rawValue: entry.key) else { return nil }
             return appearance.name(for: kind)
         }
         return Button { selectedDay = date } label: {
-            VStack(spacing: 3) { Text("\(Calendar.current.component(.day, from: date))").font(.system(size: 13, weight: selected ? .bold : .regular)); HStack(spacing: 2) { if count > 0 { Circle().fill(macBlue).frame(width: 5, height: 5) }; if !badges.isEmpty { Circle().fill(.orange).frame(width: 5, height: 5) } }.frame(height: 6) }.frame(maxWidth: .infinity, minHeight: 39).background(selected ? macBlue.opacity(0.14) : Color.white).cornerRadius(8).opacity(inMonth ? 1 : 0.42)
-        }.buttonStyle(.plain).accessibilityLabel("\(key)，\(count)项待办\(badges.isEmpty ? "" : "，\(badges.joined(separator: "、"))")")
+            VStack(spacing: 3) {
+                Text("\(Calendar.current.component(.day, from: date))")
+                    .font(.system(size: 15, weight: selected || today ? .semibold : .regular))
+                    .monospacedDigit()
+                    .foregroundColor(selected || today ? macBlue : (inMonth ? ink : secondaryInk))
+                HStack(spacing: 3) {
+                    if count > 0 { Circle().fill(macBlue).frame(width: 5, height: 5) }
+                    if !badges.isEmpty { Circle().fill(.orange).frame(width: 5, height: 5) }
+                }.frame(height: 5)
+            }
+            .frame(maxWidth: .infinity, minHeight: 37)
+            .background(RoundedRectangle(cornerRadius: 8).fill(selected ? macBlue.opacity(0.12) : .clear))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(today ? macBlue.opacity(0.48) : .clear))
+            .contentShape(Rectangle())
+        }.buttonStyle(.plain)
+            .simultaneousGesture(TapGesture(count: 2).onEnded { startTask(on: date) })
+            .help("双击添加待办")
+            .accessibilityLabel("\(key)\(today ? "，今天" : "")，\(count)项待办\(badges.isEmpty ? "" : "，\(badges.joined(separator: "、"))")")
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            .accessibilityAction(named: Text("在这一天添加待办")) { startTask(on: date) }
     }
-    private var monthTitle: String { let f = DateFormatter(); f.locale = Locale(identifier: "zh_CN"); f.dateFormat = "yyyy年M月"; return f.string(from: visibleMonth) }
-    private var selectedTitle: String { let f = DateFormatter(); f.locale = Locale(identifier: "zh_CN"); f.dateFormat = "M月d日 EEEE"; return f.string(from: selectedDay) }
+    private func monthButton(_ offset: Int, icon: String, label: String) -> some View {
+        Button { changeMonth(offset) } label: {
+            Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                .frame(width: 30, height: 28).background(paper, in: RoundedRectangle(cornerRadius: 7))
+        }.buttonStyle(.plain).help(label).accessibilityLabel(label)
+    }
+    private func startTask(on date: Date) {
+        guard newTaskDay == nil && editorTask == nil else { return }
+        selectedDay = date
+        newTaskDay = NewTaskDay(id: TaskSchedule.ymd(date))
+    }
+    private var monthTitle: String { let f = DateFormatter(); f.locale = Locale(identifier: "zh_CN"); f.dateFormat = "yyyy 年 M 月"; return f.string(from: visibleMonth) }
+    private var selectedTitle: String { let f = DateFormatter(); f.locale = Locale(identifier: "zh_CN"); f.dateFormat = "M月d日 · EEE"; return f.string(from: selectedDay) }
     private func changeMonth(_ amount: Int) { if let date = Calendar.current.date(byAdding: .month, value: amount, to: visibleMonth) { visibleMonth = date; selectedDay = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: date)) ?? date } }
 }
 
@@ -405,6 +480,8 @@ private struct TaskEditor: View {
     @State(wrappedValue: TaskRecurrence.none) private var recurrence: TaskRecurrence
     @State(wrappedValue: false) private var priority: Bool
     @State(wrappedValue: nil) private var errorText: String?
+    @State(wrappedValue: false) private var confirmDelete: Bool
+    @FocusState private var titleFocused: Bool
     init(planner: PlannerStore, task: PlannerTask? = nil, initialDate: String? = nil) {
         self.planner = planner; existing = task
         let seededDate = TaskEditorDefaults.initialDate(existing: task, suggestedDate: initialDate)
@@ -417,7 +494,7 @@ private struct TaskEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(existing == nil ? "新建待办" : "编辑待办").font(.title2.bold())
-            TextField("标题", text: $title).textFieldStyle(.roundedBorder)
+            TextField("标题", text: $title).textFieldStyle(.roundedBorder).focused($titleFocused)
             TextField("详细说明（可选）", text: $details, axis: .vertical).lineLimit(3...6).textFieldStyle(.roundedBorder)
             Toggle("安排日期", isOn: $hasDate).onChange(of: hasDate) { if !$0 { hasReminder = false; recurrence = .none } }
             if hasDate { DatePicker("日期", selection: $date, displayedComponents: .date) }
@@ -427,8 +504,19 @@ private struct TaskEditor: View {
             Toggle("标为重要", isOn: $priority)
             if let errorText { Text(errorText).foregroundColor(.red).font(.caption) }
             Spacer()
-            HStack { if let existing { Button("删除", role: .destructive) { do { try planner.deleteTask(id: existing.id); dismiss() } catch { errorText = error.localizedDescription } }.accessibilityLabel("删除待办") }; Spacer(); Button("取消") { dismiss() }.keyboardShortcut(.cancelAction); Button("保存", action: save).keyboardShortcut(.defaultAction) }
+            HStack { if existing != nil { Button("删除", role: .destructive) { confirmDelete = true }.accessibilityLabel("删除待办") }; Spacer(); Button("取消") { dismiss() }.keyboardShortcut(.cancelAction); Button("保存", action: save).keyboardShortcut(.defaultAction).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
         }.padding(24).frame(width: 430).frame(minHeight: 470).background(paper)
+        .onAppear { if existing == nil { titleFocused = true } }
+        .alert("删除这项待办？", isPresented: $confirmDelete) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
+                guard let existing else { return }
+                do { try planner.deleteTask(id: existing.id); dismiss() }
+                catch { errorText = error.localizedDescription }
+            }
+        } message: {
+            Text(existing?.recurrence == TaskRecurrence.none ? "将从待办和日历中移除。" : "该重复待办的所有日期都会一并移除。")
+        }
     }
     private func save() {
         let time: String? = hasDate && hasReminder ? { let c = Calendar.current.dateComponents([.hour, .minute], from: reminder); return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0) }() : nil
@@ -447,6 +535,7 @@ private struct NoteEditor: View {
     @State(wrappedValue: "") private var baselineBody: String
     @State(wrappedValue: nil) private var errorText: String?
     @State(wrappedValue: false) private var confirmDiscard: Bool
+    @State(wrappedValue: false) private var confirmDelete: Bool
     private var dirty: Bool { title != baselineTitle || bodyText != baselineBody }
     init(planner: PlannerStore, note: PlannerNote? = nil) {
         self.planner = planner; existing = note
@@ -460,9 +549,17 @@ private struct NoteEditor: View {
             TextField("标题", text: $title).textFieldStyle(.roundedBorder)
             TextEditor(text: $bodyText).font(.body).padding(5).background(Color.white).cornerRadius(8).overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.black.opacity(0.12)))
             if let errorText { Text(errorText).foregroundColor(.red).font(.caption) }
-            HStack { if let existing { Button("删除", role: .destructive) { do { try planner.deleteNote(id: existing.id); dismiss() } catch { errorText = error.localizedDescription } } }; Spacer(); Button("取消") { if dirty { confirmDiscard = true } else { dismiss() } }.keyboardShortcut(.cancelAction); Button("保存") { _ = save(closeAfter: true) }.keyboardShortcut(.defaultAction) }
+            HStack { if existing != nil { Button("删除", role: .destructive) { confirmDelete = true } }; Spacer(); Button("取消") { if dirty { confirmDiscard = true } else { dismiss() } }.keyboardShortcut(.cancelAction); Button("保存") { _ = save(closeAfter: true) }.keyboardShortcut(.defaultAction) }
         }.padding(24).frame(width: 500, height: 460).background(paper).interactiveDismissDisabled(dirty)
         .alert("放弃未保存的修改？", isPresented: $confirmDiscard) { Button("继续编辑", role: .cancel) {}; Button("放弃修改", role: .destructive) { dismiss() } }
+        .alert("删除这篇笔记？", isPresented: $confirmDelete) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
+                guard let existing else { return }
+                do { try planner.deleteNote(id: existing.id); dismiss() }
+                catch { errorText = error.localizedDescription }
+            }
+        }
         .onAppear {
             UnsavedNoteGuard.shared.register { save(closeAfter: false) }
             UnsavedNoteGuard.shared.setDirty(dirty)
@@ -485,7 +582,16 @@ private struct NoteEditor: View {
 private struct PageHeader<Actions: View>: View {
     let title: String, subtitle: String
     @ViewBuilder let actions: () -> Actions
-    var body: some View { HStack { VStack(alignment: .leading, spacing: 3) { Text(title).font(.system(size: 25, weight: .bold, design: .rounded)); Text(subtitle).font(.caption).foregroundColor(secondaryInk) }; Spacer(); actions() }.padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 15).background(Color.white.opacity(0.74)) }
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 24, weight: .semibold)).foregroundColor(ink)
+                Text(subtitle).font(.system(size: 12, weight: .medium)).foregroundColor(secondaryInk).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            actions()
+        }.padding(.horizontal, 24).padding(.top, 18).padding(.bottom, 12)
+    }
 }
 
 private struct ReminderFooter: View {
@@ -506,6 +612,12 @@ private struct AppearanceSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var names: [String: String]
     @State(wrappedValue: nil) private var errorText: String?
+    @State(wrappedValue: nil) private var savedStatus: String?
+    @State(wrappedValue: false) private var confirmClose: Bool
+
+    private var namesChanged: Bool {
+        EventKind.allCases.contains { (names[$0.rawValue] ?? $0.title) != appearance.name(for: $0) }
+    }
 
     init(appearance: AppearanceStore) {
         self.appearance = appearance
@@ -523,7 +635,7 @@ private struct AppearanceSettingsView: View {
                     Text("窗口大小和透明度会立即保存并应用。").font(.caption).foregroundColor(secondaryInk)
                 }
                 Spacer()
-                Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("完成") { if namesChanged { confirmClose = true } else { dismiss() } }.keyboardShortcut(.cancelAction)
             }
 
             GroupBox("窗口大小") {
@@ -555,12 +667,14 @@ private struct AppearanceSettingsView: View {
                     HStack {
                         Button("恢复默认名称") { resetNames() }
                         Spacer()
-                        Button("保存名称") { saveNames() }.keyboardShortcut(.defaultAction)
+                        Button("保存名称") { _ = saveNames() }.keyboardShortcut(.defaultAction)
+                            .disabled(!namesChanged)
                     }.padding(.top, 3)
                 }.padding(.vertical, 4)
             }
 
             if let errorText { Text(errorText).foregroundColor(.red).font(.caption) }
+            if let savedStatus { Label(savedStatus, systemImage: "checkmark.circle").foregroundColor(.green).font(.caption) }
             HStack {
                 Button("恢复默认外观") { resetAppearance() }
                     .help("恢复标准窗口大小和 100% 透明度；不会修改日期、任务或名称")
@@ -568,6 +682,12 @@ private struct AppearanceSettingsView: View {
             }
             }.padding(24).frame(width: contentWidth, alignment: .leading)
         }.frame(width: viewport.width, height: viewport.height).background(paper)
+        .interactiveDismissDisabled(namesChanged)
+        .alert("保存修改后的名称？", isPresented: $confirmClose) {
+            Button("继续编辑", role: .cancel) {}
+            Button("放弃修改", role: .destructive) { dismiss() }
+            Button("保存并关闭") { if saveNames() { dismiss() } }
+        }
     }
 
     private var sheetViewport: CGSize {
@@ -576,7 +696,7 @@ private struct AppearanceSettingsView: View {
     }
 
     private func nameBinding(for kind: EventKind) -> Binding<String> {
-        Binding(get: { names[kind.rawValue] ?? kind.title }, set: { names[kind.rawValue] = $0 })
+        Binding(get: { names[kind.rawValue] ?? kind.title }, set: { names[kind.rawValue] = $0; savedStatus = nil })
     }
 
     private func updateOpacity(_ value: Double) {
@@ -584,12 +704,18 @@ private struct AppearanceSettingsView: View {
         catch { errorText = "透明度保存失败：\(error.localizedDescription)" }
     }
 
-    private func saveNames() {
+    private func saveNames() -> Bool {
         do {
             try appearance.updateNames(names)
             names = Dictionary(uniqueKeysWithValues: EventKind.allCases.map { ($0.rawValue, appearance.name(for: $0)) })
             errorText = nil
-        } catch { errorText = "名称保存失败：\(error.localizedDescription)" }
+            savedStatus = "名称已保存"
+            return true
+        } catch {
+            savedStatus = nil
+            errorText = "名称保存失败：\(error.localizedDescription)"
+            return false
+        }
     }
 
     private func resetNames() {
@@ -597,6 +723,7 @@ private struct AppearanceSettingsView: View {
             try appearance.resetNames()
             names = Dictionary(uniqueKeysWithValues: EventKind.allCases.map { ($0.rawValue, appearance.name(for: $0)) })
             errorText = nil
+            savedStatus = "已恢复默认名称"
         } catch { errorText = "默认名称恢复失败：\(error.localizedDescription)" }
     }
 
@@ -615,14 +742,19 @@ private struct EventEditor: View {
     @State(wrappedValue: Date()) private var end: Date
     @State(wrappedValue: false) private var hasEnd: Bool
     @State(wrappedValue: nil) private var errorText: String?
+    @State(wrappedValue: false) private var confirmReset: Bool
     init(kind: EventKind, name: String, store: CountdownStore, today: Date) { self.kind = kind; self.name = name; self.store = store; let saved = store.selections[kind.rawValue], initial = saved.flatMap { CountdownMath.date($0.start) } ?? CountdownMath.defaultStart(kind, today: today) ?? today; _start = State(initialValue: initial); _end = State(initialValue: saved?.end.flatMap(CountdownMath.date) ?? initial); _hasEnd = State(initialValue: saved?.end != nil) }
     var body: some View {
         VStack(alignment: .leading, spacing: 17) {
             Text("设置\(name)日期").font(.title2.bold()); DatePicker(kind == .retirement ? "目标日期" : "开始日期", selection: $start, displayedComponents: .date)
             if kind != .retirement { Toggle("设置结束日期", isOn: $hasEnd); if hasEnd { DatePicker("结束日期", selection: $end, in: start..., displayedComponents: .date) } }
             if let errorText { Text(errorText).foregroundColor(.red).font(.caption) }
-            Spacer(); HStack { Button(kind == .labor || kind == .national ? "恢复默认" : "清空日期") { update(nil) }; Spacer(); Button("取消") { dismiss() }; Button("保存") { update(EventDates(start: CountdownMath.ymd(start), end: kind != .retirement && hasEnd ? CountdownMath.ymd(end) : nil)) }.keyboardShortcut(.defaultAction) }
+            Spacer(); HStack { Button(kind == .labor || kind == .national ? "恢复默认" : "清空日期") { confirmReset = true }; Spacer(); Button("取消") { dismiss() }; Button("保存") { update(EventDates(start: CountdownMath.ymd(start), end: kind != .retirement && hasEnd ? CountdownMath.ymd(end) : nil)) }.keyboardShortcut(.defaultAction) }
         }.padding(24).frame(width: 400).frame(minHeight: 255).background(paper)
+        .alert(kind == .labor || kind == .national ? "恢复默认日期？" : "清空\(name)日期？", isPresented: $confirmReset) {
+            Button("取消", role: .cancel) {}
+            Button("确认", role: .destructive) { update(nil) }
+        }
     }
     private func update(_ dates: EventDates?) { do { try store.update(kind, dates: dates); dismiss() } catch { errorText = error.localizedDescription } }
 }

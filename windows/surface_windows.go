@@ -36,6 +36,11 @@ type gradientVertex struct {
 	Red, Green, Blue, Alpha uint16
 }
 
+type calendarDayPaint struct {
+	number                                       string
+	inMonth, today, selected, hasTasks, hasBadge bool
+}
+
 var (
 	navNames  = [...]string{"倒计时", "今天", "日历", "笔记", "设置"}
 	navIcons  = [...]string{"◷", "✓", "▦", "▤", "⚙"}
@@ -153,8 +158,9 @@ func drawSurface(lp uintptr) bool {
 	pCopyMemory.Call(uintptr(unsafe.Pointer(&item)), lp, unsafe.Sizeof(item))
 	id := int(item.ControlID)
 	countdown := id >= idCountdownBase && id < idCountdownBase+len(countdownButtons)
+	calendarDay := id >= idCalDayBase && id < idCalDayBase+len(calendarDays)
 	navigation := id >= idNavCountdown && id <= idNavNotes || id == idSettings
-	if item.ControlType != 4 || !countdown && !navigation { // ODT_BUTTON
+	if item.ControlType != 4 || !countdown && !navigation && !calendarDay { // ODT_BUTTON
 		return false
 	}
 	r, dc := item.Rect, item.Hdc
@@ -165,6 +171,10 @@ func drawSurface(lp uintptr) bool {
 	defer pRestoreDC.Call(dc, saved)
 	pressed := item.State&0x1 != 0
 	focused := item.State&0x10 != 0 && item.State&0x200 == 0
+	if calendarDay {
+		paintCalendarDay(dc, r, calendarDaysPaint[id-idCalDayBase], pressed, focused)
+		return true
+	}
 	if navigation {
 		i := id - idNavCountdown
 		if id == idSettings {
@@ -233,4 +243,36 @@ func drawSurface(lp uintptr) bool {
 		fillColor(dc, area(r, 4, 15, int(float64(r.Right-r.Left)/scale)-6, 47), accentInk)
 	}
 	return true
+}
+
+func paintCalendarDay(dc uintptr, r rect, day calendarDayPaint, pressed, focused bool) {
+	pFillRect.Call(dc, uintptr(unsafe.Pointer(&r)), bgBrush)
+	fill, color, face := rgb(250, 252, 255), textInk, normalFont
+	if !day.inMonth {
+		fill, color = rgb(244, 247, 251), textMuted
+	}
+	if day.selected || pressed {
+		fill, color, face = rgb(214, 228, 249), accentInk, boldFont
+	}
+	if day.today || focused {
+		surface(dc, r, 8, rgb(116, 154, 215))
+		r = inset(r, 1, 1)
+		color = accentInk
+	}
+	surface(dc, r, 8, fill)
+	surfaceText(dc, area(r, 0, 3, 0, 30), day.number, face, color, 1)
+	center := (r.Left + r.Right) / 2
+	top := r.Top + int32(px(31))
+	dot := func(x int32, color uintptr) {
+		d := int32(max(1, int(px(4))))
+		surface(dc, rect{x, top, x + d, top + d}, 2, color)
+	}
+	if day.hasTasks && day.hasBadge {
+		dot(center-int32(px(5)), accentInk)
+		dot(center+int32(px(2)), rgb(190, 104, 22))
+	} else if day.hasTasks {
+		dot(center-int32(px(2)), accentInk)
+	} else if day.hasBadge {
+		dot(center-int32(px(2)), rgb(190, 104, 22))
+	}
 }

@@ -89,6 +89,7 @@ const (
 	wsMaximizeBox      = 0x00010000
 	wsThickFrame       = 0x00040000
 	wsExLayered        = 0x00080000
+	bnDoubleClicked    = 5
 	wmDestroy          = 0x0002
 	wmSize             = 0x0005
 	wmClose            = 0x0010
@@ -244,6 +245,10 @@ var (
 	calendarMonth, calendarSelected                                                      time.Time
 	calendarLabel, calendarSelectedLabel, calendarList                                   uintptr
 	calendarDays                                                                         [42]uintptr
+	calendarWeekLabels                                                                   [7]uintptr
+	calendarDaysPaint                                                                    [42]calendarDayPaint
+	lastCalendarClick                                                                    int
+	lastCalendarClickDate                                                                string
 	calendarRefs                                                                         []TaskOccurrence
 	noteSearch, noteList, noteTitle, noteBody                                            uintptr
 	noteRefs                                                                             []string
@@ -251,6 +256,7 @@ var (
 	settingsControls                                                                     []uintptr
 	nameEdits                                                                            [5]uintptr
 	opacitySlider, opacityLabel, todayHint, noteHint                                     uintptr
+	settingsStatus                                                                       uintptr
 	settingsOpen, windowReady, sizeSavePending, opacitySavePending                       bool
 	previewOpacity                                                                       float64
 	trayAdded, trayHintShown, exiting                                                    bool
@@ -469,6 +475,9 @@ func layoutControls(clientWidth, clientHeight int) {
 
 	// Calendar columns and the selected-day task list grow with the window.
 	colExtra := dw / 7
+	for i, h := range calendarWeekLabels {
+		moveControl(h, 166+i*(79+colExtra), 68, 70+colExtra, 24)
+	}
 	for i, h := range calendarDays {
 		moveControl(h, 166+(i%7)*(79+colExtra), 94+(i/7)*47, 70+colExtra, 40)
 	}
@@ -520,6 +529,9 @@ func showView(next int) {
 		return
 	}
 	if settingsOpen {
+		if !finishNamesEditing() {
+			return
+		}
 		settingsOpen = false
 		setVisible(settingsControls, false)
 	}
@@ -539,6 +551,7 @@ func openSettings() {
 		return
 	}
 	settingsOpen = true
+	setText(settingsStatus, "")
 	setVisible(viewControls[view], false)
 	setVisible(settingsControls, true)
 	for i, k := range Events {
@@ -552,7 +565,7 @@ func openSettings() {
 	pInvalidateRect.Call(mainWnd, 0, 1)
 }
 func closeSettings() {
-	if !settingsOpen {
+	if !settingsOpen || !finishNamesEditing() {
 		return
 	}
 	savePreviewOpacity()
@@ -563,23 +576,45 @@ func closeSettings() {
 	invalidateNavigation()
 	pInvalidateRect.Call(mainWnd, 0, 1)
 }
-func saveNames() {
+func finishNamesEditing() bool {
+	for i, k := range Events {
+		name, _ := customName(k)
+		if getText(nameEdits[i]) == name {
+			continue
+		}
+		switch message(mainWnd, "名称有未保存的修改。要保存后离开吗？\n\n选择“否”将放弃这些修改。", 0x03|0x20) {
+		case 6: // Yes
+			return saveNames()
+		case 7: // No
+			return true
+		default:
+			return false
+		}
+	}
+	return true
+}
+func saveNames() bool {
 	names := make(map[Kind]string, len(Events))
 	for i, k := range Events {
 		name := strings.TrimSpace(getText(nameEdits[i]))
 		if err := validateCustomName(name); err != nil {
 			message(mainWnd, k.Title()+"名称无效："+err.Error(), 0x10)
 			pSetFocus.Call(nameEdits[i])
-			return
+			return false
 		}
 		names[k] = name
 	}
 	if err := appearance.SetNames(names); err != nil {
 		message(mainWnd, "保存名称失败："+err.Error(), 0x10)
-		return
+		return false
 	}
+	for i, k := range Events {
+		setText(nameEdits[i], names[k])
+	}
+	setText(settingsStatus, "名称已保存")
 	refreshCountdown()
 	refreshCalendar()
+	return true
 }
 func resetNames() {
 	if err := appearance.ResetNames(); err != nil {
@@ -589,6 +624,7 @@ func resetNames() {
 	for i, k := range Events {
 		setText(nameEdits[i], k.Title())
 	}
+	setText(settingsStatus, "已恢复默认名称")
 	refreshCountdown()
 	refreshCalendar()
 }
@@ -728,26 +764,31 @@ func countdownBadge(date string) string {
 }
 func refreshCalendar() {
 	selected, hasSelection := selectedRef(calendarList, calendarRefs)
-	setText(calendarLabel, fmt.Sprintf("%d年%d月", calendarMonth.Year(), calendarMonth.Month()))
-	setText(calendarSelectedLabel, "已选："+calendarSelected.Format("2006年01月02日"))
-	grid := MonthGrid(calendarMonth, time.Now())
-	for i, c := range grid {
-		s := fmt.Sprint(c.Day)
-		if badge := countdownBadge(c.Date); badge != "" {
-			s += " ·" + badge
+	setText(calendarLabel, fmt.Sprintf("%d 年 %d 月", calendarMonth.Year(), calendarMonth.Month()))
+	selectedDate := calendarSelected.Format("2006-01-02")
+	calendarRefs = TasksForDate(planner.Tasks, selectedDate)
+	setText(calendarSelectedLabel, fmt.Sprintf("%s · %d 项待办", calendarSelected.Format("01月02日"), len(calendarRefs)))
+	for i, day := range MonthGrid(calendarMonth, time.Now()) {
+		count := len(TasksForDate(planner.Tasks, day.Date))
+		badge := countdownBadge(day.Date)
+		calendarDaysPaint[i] = calendarDayPaint{
+			number: fmt.Sprint(day.Day), inMonth: day.InMonth, today: day.IsToday,
+			selected: day.Date == selectedDate, hasTasks: count != 0, hasBadge: badge != "",
 		}
-		if len(TasksForDate(planner.Tasks, c.Date)) > 0 {
-			s += " ·"
+		label := fmt.Sprintf("%s，%d 项待办", day.Date, count)
+		if day.IsToday {
+			label += "，今天"
 		}
-		if c.IsToday {
-			s = "[" + s + "]"
-		} else if !c.InMonth {
-			s = "(" + s + ")"
+		if day.Date == selectedDate {
+			label += "，已选"
 		}
-		setText(calendarDays[i], s)
+		if badge != "" {
+			label += "，" + badge
+		}
+		setText(calendarDays[i], label)
+		pInvalidateRect.Call(calendarDays[i], 0, 0)
 	}
 	listReset(calendarList)
-	calendarRefs = TasksForDate(planner.Tasks, calendarSelected.Format("2006-01-02"))
 	for i, r := range calendarRefs {
 		t, _ := taskByID(r.TaskID)
 		m := "○ "
@@ -904,12 +945,21 @@ func quickAdd() {
 	if title == "" {
 		return
 	}
-	if _, err := planner.UpsertTask(Task{Title: title, Repeat: RepeatNone}, time.Now()); err != nil {
+	now := time.Now()
+	id, err := planner.UpsertTask(Task{Title: title, Date: civil(now).Format("2006-01-02"), Repeat: RepeatNone}, now)
+	if err != nil {
 		message(mainWnd, "添加失败："+err.Error(), 0x10)
 		return
 	}
 	setText(quickTitle, "")
+	setText(todaySearch, "")
 	refreshToday()
+	for i, ref := range todayRefs {
+		if ref.TaskID == id {
+			pSendMessage.Call(todayList, lbSetCurSel, uintptr(i), 0)
+			break
+		}
+	}
 }
 func toggleTask(r TaskOccurrence) {
 	t, ok := taskByID(r.TaskID)
@@ -933,17 +983,21 @@ func deleteTask(r TaskOccurrence) {
 	}
 	refreshView()
 }
-func selectCalendarDay(i int) {
-	g := MonthGrid(calendarMonth, time.Now())
-	if i < 0 || i >= len(g) {
-		return
+func selectCalendarDay(i int) string {
+	grid := MonthGrid(calendarMonth, time.Now())
+	if i < 0 || i >= len(grid) {
+		return ""
 	}
-	d, _ := parseDate(g[i].Date)
-	calendarSelected = d
-	if d.Month() != calendarMonth.Month() {
-		calendarMonth = time.Date(d.Year(), d.Month(), 1, 0, 0, 0, 0, time.Local)
+	date, err := parseDate(grid[i].Date)
+	if err != nil {
+		return ""
+	}
+	calendarSelected = date
+	if date.Month() != calendarMonth.Month() {
+		calendarMonth = time.Date(date.Year(), date.Month(), 1, 0, 0, 0, 0, time.Local)
 	}
 	refreshCalendar()
+	return grid[i].Date
 }
 
 func loadSelectedNote() {
@@ -1086,11 +1140,39 @@ func checkReminders() {
 		lines = append(lines, r.Time+"  "+r.Title)
 	}
 	body := strings.Join(lines, "\n")
-	balloon("有盼提醒", body)
-	message(mainWnd, "现在要做：\n\n"+body, 0x40)
+	presentReminder("现在要做：\n\n" + body)
+}
+func presentReminder(text string) {
+	balloon("有盼提醒", text)
+	message(mainWnd, text, 0x40)
 }
 
 func handleCommand(id int, n uint16) {
+	if id >= idCalDayBase && id < idCalDayBase+len(calendarDays) {
+		if view != 2 || settingsOpen || dateEditorOpen || taskEditorOpen {
+			return
+		}
+		index := id - idCalDayBase
+		switch n {
+		case 0:
+			lastCalendarClick = index
+			lastCalendarClickDate = selectCalendarDay(index)
+		case bnDoubleClicked:
+			// A spillover date can change the month after the first click.
+			day := lastCalendarClickDate
+			if day == "" || lastCalendarClick != index {
+				day = selectCalendarDay(index)
+			}
+			lastCalendarClickDate = ""
+			if day != "" {
+				openTaskEditor("", day)
+			}
+		}
+		return
+	}
+	if n == 0 {
+		lastCalendarClickDate = ""
+	}
 	if id == idTodaySearch && n == 0x300 {
 		refreshToday()
 		return
@@ -1141,6 +1223,9 @@ func handleCommand(id int, n uint16) {
 	case idDateCancel:
 		closeDateEditor()
 	case idDateReset:
+		if message(mainWnd, "确认清空或恢复此倒计时的默认日期？", 0x04|0x20) != 6 {
+			return
+		}
 		if err := state.SetDates(dateEditing, nil); err != nil {
 			message(mainWnd, "无法保存更改："+err.Error(), 0x10)
 		} else {
@@ -1169,16 +1254,18 @@ func handleCommand(id int, n uint16) {
 			deleteTask(r)
 		}
 	case idTestReminder:
-		message(mainWnd, "这是测试提醒。\n\n测试不会创建任务，也不会写入提醒记录。", 0x40)
+		presentReminder("这是测试提醒。\n\n测试不会创建任务，也不会写入提醒记录。")
 	case idTaskSave:
 		saveTaskEditor()
 	case idTaskCancel:
 		closeTaskEditor()
 	case idCalPrev:
 		calendarMonth = calendarMonth.AddDate(0, -1, 0)
+		calendarSelected = civil(calendarMonth)
 		refreshCalendar()
 	case idCalNext:
 		calendarMonth = calendarMonth.AddDate(0, 1, 0)
+		calendarSelected = civil(calendarMonth)
 		refreshCalendar()
 	case idCalToday:
 		now := time.Now()
@@ -1206,6 +1293,9 @@ func handleCommand(id int, n uint16) {
 	case idTrayOpen:
 		showMain()
 	case idTrayQuit:
+		if settingsOpen && !finishNamesEditing() {
+			return
+		}
 		if view == 3 && !confirmDiscardNote() {
 			return
 		}
@@ -1216,8 +1306,6 @@ func handleCommand(id int, n uint16) {
 	default:
 		if id >= idCountdownBase && id < idCountdownBase+len(Events) {
 			openDateEditor(Events[id-idCountdownBase])
-		} else if id >= idCalDayBase && id < idCalDayBase+42 {
-			selectCalendarDay(id - idCalDayBase)
 		}
 	}
 }
@@ -1311,9 +1399,6 @@ func wndProc(hwnd uintptr, m uint32, wp, lp uintptr) uintptr {
 			pDestroyWindow.Call(hwnd)
 			return 0
 		}
-		if view == 3 && !confirmDiscardNote() {
-			return 0
-		}
 		savePreviewOpacity()
 		saveCurrentWindowSize()
 		pShowWindow.Call(hwnd, swHide)
@@ -1360,7 +1445,7 @@ func buildControls() {
 	viewControls[0] = v0
 	v1 := []uintptr{static("今天", 166, 24, 160, 40, true), static(time.Now().Format("2006年01月02日"), 166, 64, 220, 25, false)}
 	quickTitle = edit("", 166, 100, 438, 34, idQuickTitle, false)
-	v1 = append(v1, quickTitle, button("快速添加", 614, 100, 104, 34, idQuickAdd))
+	v1 = append(v1, quickTitle, button("添加到今天", 614, 100, 104, 34, idQuickAdd))
 	v1 = append(v1, static("搜索", 166, 150, 48, 25, false))
 	todaySearch = edit("", 216, 145, 266, 32, idTodaySearch, false)
 	modeTodayButton = button("● 今日", 494, 145, 94, 32, idModeToday)
@@ -1377,17 +1462,20 @@ func buildControls() {
 	v2 := []uintptr{button("‹", 166, 22, 42, 34, idCalPrev), button("今天", 216, 22, 68, 34, idCalToday), button("›", 292, 22, 42, 34, idCalNext)}
 	calendarLabel = static("", 350, 22, 190, 38, true)
 	v2 = append(v2, calendarLabel)
-	for i, s := range []string{"一", "二", "三", "四", "五", "六", "日"} {
-		v2 = append(v2, static(s, 166+i*79, 68, 72, 24, false))
+	for i, s := range []string{"周一", "周二", "周三", "周四", "周五", "周六", "周日"} {
+		calendarWeekLabels[i] = create("STATIC", s, 1, 0, 166+i*79, 68, 70, 24, 0)
+		font(calendarWeekLabels[i], smallFont)
+		v2 = append(v2, calendarWeekLabels[i])
 	}
 	for i := 0; i < 42; i++ {
-		calendarDays[i] = button("", 166+(i%7)*79, 94+(i/7)*47, 70, 40, idCalDayBase+i)
-		font(calendarDays[i], smallFont)
+		calendarDays[i] = create("BUTTON", "", wsTabstop|bsOwnerDraw, 0, 166+(i%7)*79, 94+(i/7)*47, 70, 40, idCalDayBase+i)
 		v2 = append(v2, calendarDays[i])
 	}
 	calendarSelectedLabel = static("", 166, 386, 330, 26, false)
 	calendarList = listbox(166, 416, 552, 132, idCalList)
-	v2 = append(v2, calendarSelectedLabel, calendarList, button("在所选日期添加", 166, 562, 145, 36, idCalAdd), button("完成 / 恢复", 321, 562, 120, 36, idCalDone), button("编辑", 451, 562, 86, 36, idCalEdit))
+	calHint := static("双击日期添加待办", 541, 387, 177, 25, false)
+	font(calHint, smallFont)
+	v2 = append(v2, calendarSelectedLabel, calHint, calendarList, button("新建待办", 166, 562, 145, 36, idCalAdd), button("完成 / 恢复", 321, 562, 120, 36, idCalDone), button("编辑", 451, 562, 86, 36, idCalEdit))
 	viewControls[2] = v2
 	v3 := []uintptr{static("笔记", 166, 24, 160, 40, true), static("搜索", 166, 73, 60, 26, false)}
 	noteSearch = edit("", 222, 69, 496, 32, idNoteSearch, false)
@@ -1446,6 +1534,9 @@ func buildControls() {
 		settingsControls = append(settingsControls, nameEdits[i])
 	}
 	settingsControls = append(settingsControls, button("保存名称", 166, 544, 110, 36, idNamesSave), button("恢复默认名称", 286, 544, 130, 36, idNamesReset), button("恢复默认外观", 426, 544, 130, 36, idVisualReset), button("返回", 566, 544, 90, 36, idSettingsBack))
+	settingsStatus = static("", 166, 590, 410, 25, false)
+	font(settingsStatus, smallFont)
+	settingsControls = append(settingsControls, settingsStatus)
 	setVisible(settingsControls, false)
 	for i := 1; i < 4; i++ {
 		setVisible(viewControls[i], false)
