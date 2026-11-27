@@ -29,6 +29,7 @@ var (
 	pDispatchMessage      = u32.NewProc("DispatchMessageW")
 	pIsDialogMessage      = u32.NewProc("IsDialogMessageW")
 	pPostQuit             = u32.NewProc("PostQuitMessage")
+	pPostMessage          = u32.NewProc("PostMessageW")
 	pSendMessage          = u32.NewProc("SendMessageW")
 	pSetWindowText        = u32.NewProc("SetWindowTextW")
 	pGetWindowText        = u32.NewProc("GetWindowTextW")
@@ -259,7 +260,7 @@ var (
 	settingsStatus                                                                       uintptr
 	settingsOpen, windowReady, sizeSavePending, opacitySavePending                       bool
 	previewOpacity                                                                       float64
-	trayAdded, trayHintShown, exiting                                                    bool
+	trayAdded, exiting                                                                   bool
 )
 
 func w(s string) *uint16          { p, _ := syscall.UTF16PtrFromString(s); return p }
@@ -1091,7 +1092,7 @@ func addTray() {
 		return
 	}
 	n := notifyIconData{CbSize: uint32(unsafe.Sizeof(notifyIconData{})), HWnd: mainWnd, UID: 1, UFlags: 7, UCallbackMessage: wmTray, HIcon: appIcon}
-	copy16(n.SzTip[:], "有盼 · 关闭窗口后仍在托盘运行")
+	copy16(n.SzTip[:], "有盼 · 最小化时仍会提醒")
 	r, _, _ := pShellNotifyIcon.Call(0, uintptr(unsafe.Pointer(&n)))
 	trayAdded = r != 0
 }
@@ -1125,7 +1126,31 @@ func trayMenu() {
 	var pt point
 	pGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
 	pSetForegroundWindow.Call(mainWnd)
-	pTrackPopupMenu.Call(m, 0x102, uintptr(pt.X), uintptr(pt.Y), 0, mainWnd, 0)
+	// Use WM_COMMAND notifications for the selected menu item.
+	pTrackPopupMenu.Call(m, 0x0002, uintptr(pt.X), uintptr(pt.Y), 0, mainWnd, 0)
+	// The shell requires a posted WM_NULL so the next tray menu dismisses normally.
+	pPostMessage.Call(mainWnd, 0, 0, 0)
+}
+func requestExit() {
+	if exiting {
+		return
+	}
+	exiting = true
+	defer func() { exiting = false }()
+
+	if (dateEditorOpen || taskEditorOpen) &&
+		message(mainWnd, "当前编辑尚未保存。要放弃本次编辑并退出有盼吗？", 0x04|0x30|0x100) != 6 {
+		return
+	}
+	if settingsOpen && !finishNamesEditing() {
+		return
+	}
+	if view == 3 && !confirmDiscardNote() {
+		return
+	}
+	savePreviewOpacity()
+	saveCurrentWindowSize()
+	pDestroyWindow.Call(mainWnd)
 }
 func checkReminders() {
 	due := planner.DueReminders(time.Now())
@@ -1293,16 +1318,7 @@ func handleCommand(id int, n uint16) {
 	case idTrayOpen:
 		showMain()
 	case idTrayQuit:
-		if settingsOpen && !finishNamesEditing() {
-			return
-		}
-		if view == 3 && !confirmDiscardNote() {
-			return
-		}
-		savePreviewOpacity()
-		saveCurrentWindowSize()
-		exiting = true
-		pDestroyWindow.Call(mainWnd)
+		requestExit()
 	default:
 		if id >= idCountdownBase && id < idCountdownBase+len(Events) {
 			openDateEditor(Events[id-idCountdownBase])
@@ -1395,17 +1411,7 @@ func wndProc(hwnd uintptr, m uint32, wp, lp uintptr) uintptr {
 		}
 		return 0
 	case wmClose:
-		if exiting {
-			pDestroyWindow.Call(hwnd)
-			return 0
-		}
-		savePreviewOpacity()
-		saveCurrentWindowSize()
-		pShowWindow.Call(hwnd, swHide)
-		if !trayHintShown {
-			trayHintShown = true
-			balloon("有盼仍在运行", "关闭窗口后仍在托盘运行，退出有盼后停止提醒。")
-		}
+		requestExit()
 		return 0
 	case wmDestroy:
 		removeTray()

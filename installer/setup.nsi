@@ -10,10 +10,10 @@ RequestExecutionLevel user
 SetCompressor /SOLID lzma
 ShowInstDetails nevershow
 ShowUninstDetails nevershow
-VIProductVersion "2.2.0.0"
+VIProductVersion "2.2.1.0"
 VIAddVersionKey /LANG=2052 "ProductName" "有盼"
 VIAddVersionKey /LANG=2052 "FileDescription" "有盼 · Windows 安装程序"
-VIAddVersionKey /LANG=2052 "FileVersion" "2.2.0"
+VIAddVersionKey /LANG=2052 "FileVersion" "2.2.1"
 VIAddVersionKey /LANG=2052 "LegalCopyright" ""
 !define APPKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\DaysCountdown.Desktop"
 !define MUI_ICON "Calendar.ico"
@@ -36,7 +36,7 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" ""
     FindWindow $0 "DaysCountdownMainWindow"
     StrCmp $0 0 done
     IfSilent cancel
-    MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "请先退出有盼，再点击「重试」。$\r$\n2.0 版关闭窗口后仍会在托盘运行，请在托盘菜单选择「退出有盼」。" IDRETRY retry
+    MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "请先保存正在编辑的内容并退出有盼，再点击「重试」。$\r$\n若旧版仍留在后台，请在任务管理器中结束有盼（DaysCountdown.exe）。" IDRETRY retry
   cancel:
     SetErrorLevel 2
     Abort
@@ -78,7 +78,7 @@ Section
   CreateShortcut "$DESKTOP\有盼.lnk" "$INSTDIR\DaysCountdown.exe"
   CreateShortcut "$SMPROGRAMS\有盼.lnk" "$INSTDIR\DaysCountdown.exe"
   WriteRegStr HKCU "${APPKEY}" "DisplayName" "有盼"
-  WriteRegStr HKCU "${APPKEY}" "DisplayVersion" "2.2.0"
+  WriteRegStr HKCU "${APPKEY}" "DisplayVersion" "2.2.1"
   WriteRegStr HKCU "${APPKEY}" "DisplayIcon" "$INSTDIR\DaysCountdown.exe"
   WriteRegStr HKCU "${APPKEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${APPKEY}" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
